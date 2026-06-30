@@ -16,8 +16,13 @@
 #
 # Usage (two steps — building is NOT done inside the fenced run, on purpose):
 #   zig build -Doptimize=ReleaseFast
-#   benchfence --run bench.nu --reps 20
-#   benchfence --referee-cmd "$BF/referee/zig-out/bin/referee compute" --run bench.nu   # faster, steadier gate
+#   benchfence --bound mem --run bench.nu --reps 20    # RECOMMENDED
+#
+# Use `--bound mem`: zsift is a CSV parser — it streams MBs sequentially, so it is
+# MEMORY-bound. The default awk/CPU referee is structurally blind to DRAM-bandwidth
+# contention (it would call a run "clean" while another tenant starved the parser on
+# memory); the mem referee gates on the contention that actually affects zsift. Plain
+# `benchfence --run bench.nu` works too but gates on CPU steadiness only.
 #
 # Run it WITHOUT benchfence and it still measures — ungated and loudly flagged.
 
