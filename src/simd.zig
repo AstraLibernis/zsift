@@ -32,7 +32,7 @@ pub const Options = types.Options;
 pub const Error = types.Error;
 pub const Field = types.Field;
 
-const chunk_len = 64;
+pub const chunk_len = 64;
 const Vec = @Vector(chunk_len, u8);
 
 /// Parallel prefix-XOR (inclusive scan) of a 64-bit mask: output bit i is the XOR
@@ -50,31 +50,46 @@ inline fn prefixXor(x: u64) u64 {
     return r;
 }
 
-/// Classify one already-loaded 64-byte vector: returns the bitmask of field /
-/// record separators lying OUTSIDE quoted regions, and folds the in-quote state
-/// at the chunk's end into `carry` (0 or ~0). Single source of the compare +
-/// prefix-XOR + carry logic shared by every SIMD path.
-inline fn classify(v: Vec, opts: Options, carry: *u64) u64 {
-    const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.quote)));
+/// Load the chunk at `base`: a full 64 bytes directly (no copy) when available,
+/// otherwise the final short chunk zero-padded. Avoids a per-chunk memset+memcpy
+/// that otherwise dominates classification cost; padding bytes are 0, so they
+/// never match a separator.
+inline fn loadVec(input: []const u8, base: usize) Vec {
+    if (base + chunk_len <= input.len) return input[base..][0..chunk_len].*;
+    var buf: [chunk_len]u8 = @splat(0);
+    @memcpy(buf[0 .. input.len - base], input[base..]);
+    return buf;
+}
+
+/// "Inside a quoted region" bitmask for `v`, folding the end-of-chunk in-quote
+/// state into `carry` (0 or ~0). Single source of the prefix-XOR + carry logic.
+inline fn quoteInsideMask(v: Vec, quote: u8, carry: *u64) u64 {
+    const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(quote)));
+    const inside = prefixXor(quote_bits) ^ carry.*;
+    carry.* = @bitCast(@as(i64, @bitCast(inside)) >> 63);
+    return inside;
+}
+
+/// Field/record separators (delimiter, `\n`, `\r`) outside quoted regions, for
+/// the chunk at `base`.
+inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
+    const v = loadVec(input, base);
+    const inside = quoteInsideMask(v, opts.quote, carry);
     const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
     const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
     const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-    const inside = prefixXor(quote_bits) ^ carry.*;
-    carry.* = @bitCast(@as(i64, @bitCast(inside)) >> 63);
     return (delim_bits | lf_bits | cr_bits) & ~inside;
 }
 
-/// Classify the chunk at `base`. A full 64 bytes are loaded directly (no copy);
-/// only the final short chunk is zero-padded — avoiding a per-chunk memset+memcpy
-/// that otherwise dominates the classification cost.
-inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
-    if (base + chunk_len <= input.len) {
-        const v: Vec = input[base..][0..chunk_len].*;
-        return classify(v, opts, carry);
-    }
-    var buf: [chunk_len]u8 = @splat(0);
-    @memcpy(buf[0 .. input.len - base], input[base..]);
-    return classify(@as(Vec, buf), opts, carry);
+/// Record terminators (`\n`, `\r`) outside quoted regions, for the chunk at
+/// `base`. Used by streaming to find record boundaries without a separate scalar
+/// pass. (Delimiters are excluded — a record ends only on a newline.)
+pub inline fn terminatorsAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
+    const v = loadVec(input, base);
+    const inside = quoteInsideMask(v, opts.quote, carry);
+    const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
+    const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
+    return (lf_bits | cr_bits) & ~inside;
 }
 
 /// Given a separator at `at`, return where the next field starts and whether this

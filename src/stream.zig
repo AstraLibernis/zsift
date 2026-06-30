@@ -37,34 +37,36 @@ pub const StreamError = Error || error{
 /// the index one past the last record terminator lying outside a quoted region.
 /// Returns 0 when the window holds no complete record.
 ///
-/// Strict quoting: a quote toggles the in/out-of-quotes state; escaped `""` is
-/// two toggles, so it preserves parity. A terminator only ends a record when the
-/// running quote count is even (we are outside quotes). A lone `\r` at the very
-/// end of the window is left for the next refill (it may be a split `\r\n`).
+/// Vectorized: `simd.terminatorsAt` gives, per 64-byte chunk, the `\n`/`\r` bits
+/// that lie outside quoted regions (escaped `""` self-cancels in the quote mask).
+/// We take the highest such bit per chunk — later chunks hold later boundaries —
+/// resolving `\r\n` and deferring only a lone `\r` at the very end of the window
+/// (it may be a split `\r\n` completed by the next refill).
 pub fn completeRecordsLen(window: []const u8, opts: Options) usize {
+    var carry: u64 = 0;
     var last: usize = 0;
-    var quotes: usize = 0;
-    var i: usize = 0;
-    while (i < window.len) : (i += 1) {
-        const c = window[i];
-        if (c == opts.quote) {
-            quotes += 1;
-        } else if (quotes & 1 == 0) {
-            if (c == '\n') {
-                last = i + 1;
-            } else if (c == '\r') {
-                if (i + 1 < window.len) {
-                    if (window[i + 1] == '\n') {
-                        last = i + 2;
-                        i += 1;
-                    } else {
-                        last = i + 1;
-                    }
-                } else break; // trailing '\r' — defer to the next refill
+    var base: usize = 0;
+    while (base < window.len) : (base += simd.chunk_len) {
+        var t = simd.terminatorsAt(window, base, opts, &carry);
+        while (t != 0) {
+            const hi: usize = 63 - @clz(t);
+            if (resolveTerminator(window, base + hi)) |boundary| {
+                last = boundary; // highest definitive boundary in this chunk
+                break;
             }
+            t &= ~(@as(u64, 1) << @intCast(hi)); // lone trailing '\r': try the next-highest
         }
     }
     return last;
+}
+
+/// Resolve a record terminator at absolute offset `at` to the index one past it,
+/// or `null` to defer (a lone `\r` at the very end of the window).
+fn resolveTerminator(window: []const u8, at: usize) ?usize {
+    if (window[at] == '\n') return at + 1;
+    // '\r': consume a following '\n' as CRLF; defer if it is the window's last byte.
+    if (at + 1 < window.len) return if (window[at + 1] == '\n') at + 2 else at + 1;
+    return null;
 }
 
 /// Push every field of the CSV stream to `onField(ctx, bytes, last_in_record)`,
