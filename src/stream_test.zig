@@ -153,6 +153,16 @@ test "stream: record longer than the window errors" {
     );
 }
 
+test "stream: final record that exactly fills the window is accepted (regression B3)" {
+    const data = "aaaaaaaaaaaaaaaa"; // 16 bytes, no trailing newline
+    var window: [16]u8 = undefined; // record length == window length
+    var cr = ChunkedReader.init(&window, data, 8);
+    var got = Collector{};
+    var scratch: [64]u8 = undefined;
+    try csv.streamReader(&cr.interface, &scratch, .{}, &got, Collector.on);
+    try testing.expectEqualStrings("aaaaaaaaaaaaaaaa\n", got.slice());
+}
+
 // ---------------------------------------------------------------------------
 // Auto-selecting facade
 // ---------------------------------------------------------------------------

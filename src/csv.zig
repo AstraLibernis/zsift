@@ -45,6 +45,10 @@ pub const Parser = struct {
     scratch: []u8,
     scratch_used: usize,
     opts: Options,
+    /// True when the previous field ended on a delimiter, so another field is
+    /// owed even at end of input (a trailing delimiter means a final empty
+    /// field: `"a,"` is `["a", ""]`, matching RFC 4180 / Go / Python).
+    pending: bool,
 
     /// `scratch` is only ever written when a quoted field contains an escaped
     /// quote (`""`). If your data has none, an empty scratch (`&.{}`) is fine.
@@ -55,6 +59,7 @@ pub const Parser = struct {
             .scratch = scratch,
             .scratch_used = 0,
             .opts = opts,
+            .pending = false,
         };
     }
 
@@ -67,7 +72,15 @@ pub const Parser = struct {
 
     /// Returns the next field, or `null` at end of input.
     pub fn next(self: *Parser) Error!?Field {
-        if (self.pos >= self.input.len) return null;
+        if (self.pos >= self.input.len) {
+            // A trailing delimiter leaves one final empty field owed.
+            if (self.pending) {
+                self.pending = false;
+                return .{ .bytes = self.input[self.input.len..], .last_in_record = true };
+            }
+            return null;
+        }
+        self.pending = false;
         if (self.input[self.pos] == self.opts.quote) {
             return try self.quotedField();
         }
@@ -79,15 +92,12 @@ pub const Parser = struct {
     /// entry, so every field in the returned slice is simultaneously valid.
     pub fn nextRecord(self: *Parser, dst: [][]const u8) Error!?[]const []const u8 {
         self.resetScratch();
-        if (self.pos >= self.input.len) return null;
         var n: usize = 0;
         while (true) {
-            // Inline the scratch-reset-free body so multi-field records keep
-            // their unescaped fields alive together.
-            const f = if (self.input[self.pos] == self.opts.quote)
-                try self.quotedField()
-            else
-                self.unquotedField();
+            const f = try self.next() orelse {
+                if (n == 0) return null;
+                break; // input ended mid-record (no trailing newline)
+            };
             if (n >= dst.len) return Error.TooManyFields;
             dst[n] = f.bytes;
             n += 1;
@@ -175,6 +185,7 @@ pub const Parser = struct {
         const c = self.input[self.pos];
         if (c == self.opts.delimiter) {
             self.pos += 1;
+            self.pending = true; // another field follows, even if input ends here
             return false;
         }
         if (c == '\n') {

@@ -112,6 +112,7 @@ pub fn forEachField(
     var field_start: usize = 0;
     var carry: u64 = 0;
     var base: usize = 0;
+    var pending = false; // last separator was a delimiter → a field is owed
     while (base < input.len) : (base += chunk_len) {
         const n = @min(input.len - base, chunk_len);
         var buf: [chunk_len]u8 = @splat(0);
@@ -134,20 +135,25 @@ pub fn forEachField(
             const value = try materializeInto(input[field_start..at], quote, scratch);
             if (c == delim) {
                 field_start = at + 1;
+                pending = true;
                 onField(ctx, value, false);
             } else {
                 field_start = if (c == '\r' and at + 1 < input.len and input[at + 1] == '\n')
                     at + 2
                 else
                     at + 1;
+                pending = false;
                 onField(ctx, value, true);
             }
         }
     }
-    // Final field when input does not end on a record terminator.
     if (field_start < input.len) {
+        // Final field when input does not end on a record terminator.
         const value = try materializeInto(input[field_start..], quote, scratch);
         onField(ctx, value, true);
+    } else if (pending) {
+        // Input ended on a delimiter: emit the owed trailing empty field.
+        onField(ctx, input[input.len..], true);
     }
 }
 
@@ -169,6 +175,9 @@ pub const SimdParser = struct {
     carry: u64,
     /// True once the final field has been emitted.
     finished: bool,
+    /// True when the last separator consumed was a delimiter, so a final empty
+    /// field is owed even if the input ends here (`"a,"` is `["a", ""]`).
+    pending: bool,
 
     pub fn init(input: []const u8, scratch: []u8, opts: Options) SimdParser {
         return .{
@@ -182,6 +191,7 @@ pub const SimdParser = struct {
             .structural = 0,
             .carry = 0,
             .finished = false,
+            .pending = false,
         };
     }
 
@@ -253,6 +263,7 @@ pub const SimdParser = struct {
                 const value = try self.materialize(self.input[self.field_start..at]);
                 if (c == self.opts.delimiter) {
                     self.field_start = at + 1;
+                    self.pending = true;
                     return .{ .bytes = value, .last_in_record = false };
                 }
                 // record terminator: '\n', '\r', or "\r\n"
@@ -261,17 +272,26 @@ pub const SimdParser = struct {
                         at + 2
                     else
                         at + 1;
+                self.pending = false;
                 return .{ .bytes = value, .last_in_record = true };
             }
 
             if (self.next_base >= self.input.len) {
                 if (self.finished) return null;
+                // A real final field (input did not end on a terminator).
+                if (self.field_start < self.input.len) {
+                    self.finished = true;
+                    const value = try self.materialize(self.input[self.field_start..self.input.len]);
+                    return .{ .bytes = value, .last_in_record = true };
+                }
+                // field_start sits at EOF: emit a trailing empty field only if the
+                // last byte was a delimiter; otherwise no phantom record.
                 self.finished = true;
-                // A field_start sitting exactly at EOF means the last byte was a
-                // record terminator: no phantom trailing record.
-                if (self.field_start >= self.input.len) return null;
-                const value = try self.materialize(self.input[self.field_start..self.input.len]);
-                return .{ .bytes = value, .last_in_record = true };
+                if (self.pending) {
+                    self.pending = false;
+                    return .{ .bytes = self.input[self.input.len..], .last_in_record = true };
+                }
+                return null;
             }
             self.loadChunk();
         }

@@ -135,3 +135,31 @@ test "simd: empty fields" {
     try testing.expectEqual(@as(usize, 3), rec.len);
     try testing.expectEqualStrings("", rec[1]);
 }
+
+test "simd: trailing delimiter yields a final empty field" {
+    var scratch: [64]u8 = undefined;
+    var p = SimdParser.init("a,b,", &scratch, .{});
+    var buf: [8][]const u8 = undefined;
+    const rec = (try p.nextRecord(&buf)).?;
+    try testing.expectEqual(@as(usize, 3), rec.len);
+    try testing.expectEqualStrings("a", rec[0]);
+    try testing.expectEqualStrings("b", rec[1]);
+    try testing.expectEqualStrings("", rec[2]);
+    try testing.expect((try p.nextRecord(&buf)) == null);
+}
+
+test "simd: forEachField emits trailing empty field on a final delimiter" {
+    const Collector = struct {
+        n: usize = 0,
+        last_empty_last: bool = false,
+        fn on(self: *@This(), bytes: []const u8, last: bool) void {
+            self.n += 1;
+            if (bytes.len == 0) self.last_empty_last = last;
+        }
+    };
+    var col = Collector{};
+    var scratch: [64]u8 = undefined;
+    try forEachField("a,", &scratch, .{}, &col, Collector.on);
+    try testing.expectEqual(@as(usize, 2), col.n); // "a" then ""
+    try testing.expect(col.last_empty_last); // the empty field closes the record
+}

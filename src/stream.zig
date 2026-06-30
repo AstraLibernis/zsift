@@ -86,10 +86,25 @@ pub fn streamReader(
             r.toss(boundary);
             continue;
         }
-        // No complete record buffered. A full buffer with no record boundary
-        // means the record cannot fit — refilling would assert-fail in the
-        // reader, so report it instead.
-        if (r.bufferedLen() == r.buffer.len) return StreamError.RecordTooLong;
+        // No complete record buffered. If the buffer is full we cannot fillMore
+        // (the reader's rebase would assert), so probe one byte beyond it — read
+        // into our own tiny buffer, which leaves the window untouched — to tell a
+        // genuinely over-long record (more bytes follow) from a complete final
+        // record that merely fills the window exactly (EOF here).
+        if (r.bufferedLen() == r.buffer.len) {
+            var probe: [1]u8 = undefined;
+            var bufs: [1][]u8 = .{&probe};
+            const got = r.vtable.readVec(r, &bufs) catch |err| switch (err) {
+                error.EndOfStream => {
+                    try simd.forEachField(window, scratch, opts, ctx, onField);
+                    return;
+                },
+                error.ReadFailed => return StreamError.ReadFailed,
+            };
+            // Any byte beyond a full window means the record does not fit.
+            _ = got;
+            return StreamError.RecordTooLong;
+        }
         r.fillMore() catch |err| switch (err) {
             error.EndOfStream => {
                 // End of input: any leftover is the final record (no trailing

@@ -76,6 +76,24 @@ test "empty fields" {
     });
 }
 
+test "trailing delimiter yields a final empty field (regression: was a crash)" {
+    try expectRows("a,", &.{&.{ "a", "" }});
+    try expectRows("a,b,", &.{&.{ "a", "b", "" }});
+    try expectRows("\"x\",", &.{&.{ "x", "" }});
+    try expectRows("a,\nb,", &.{ &.{ "a", "" }, &.{ "b", "" } });
+}
+
+test "nextRecord does not crash on a trailing delimiter at EOF" {
+    var scratch: [64]u8 = undefined;
+    var p = Parser.init("a,", &scratch, .{});
+    var buf: [8][]const u8 = undefined;
+    const rec = (try p.nextRecord(&buf)).?;
+    try testing.expectEqual(@as(usize, 2), rec.len);
+    try testing.expectEqualStrings("a", rec[0]);
+    try testing.expectEqualStrings("", rec[1]);
+    try testing.expect((try p.nextRecord(&buf)) == null);
+}
+
 test "crlf terminators" {
     try expectRows("a,b\r\nc,d\r\n", &.{
         &.{ "a", "b" },
