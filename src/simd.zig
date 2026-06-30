@@ -50,26 +50,72 @@ inline fn prefixXor(x: u64) u64 {
     return r;
 }
 
+/// Classify one already-loaded 64-byte vector: returns the bitmask of field /
+/// record separators lying OUTSIDE quoted regions, and folds the in-quote state
+/// at the chunk's end into `carry` (0 or ~0). Single source of the compare +
+/// prefix-XOR + carry logic shared by every SIMD path.
+inline fn classify(v: Vec, opts: Options, carry: *u64) u64 {
+    const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.quote)));
+    const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
+    const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
+    const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
+    const inside = prefixXor(quote_bits) ^ carry.*;
+    carry.* = @bitCast(@as(i64, @bitCast(inside)) >> 63);
+    return (delim_bits | lf_bits | cr_bits) & ~inside;
+}
+
+/// Classify the chunk at `base`. A full 64 bytes are loaded directly (no copy);
+/// only the final short chunk is zero-padded — avoiding a per-chunk memset+memcpy
+/// that otherwise dominates the classification cost.
+inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
+    if (base + chunk_len <= input.len) {
+        const v: Vec = input[base..][0..chunk_len].*;
+        return classify(v, opts, carry);
+    }
+    var buf: [chunk_len]u8 = @splat(0);
+    @memcpy(buf[0 .. input.len - base], input[base..]);
+    return classify(@as(Vec, buf), opts, carry);
+}
+
+/// Given a separator at `at`, return where the next field starts and whether this
+/// separator ends a record. A delimiter continues the record (`last = false`);
+/// `\n`, `\r`, or `\r\n` end it. A trailing empty field is owed when `!last`.
+inline fn recordStep(input: []const u8, at: usize, delim: u8) struct { next_start: usize, last: bool } {
+    if (input[at] == delim) return .{ .next_start = at + 1, .last = false };
+    const ns = if (input[at] == '\r' and at + 1 < input.len and input[at + 1] == '\n') at + 2 else at + 1;
+    return .{ .next_start = ns, .last = true };
+}
+
+/// Core quoted-field unescaping. An unquoted (or quote-pair-free) field returns a
+/// zero-copy slice with `written == 0`; a field containing `""` is collapsed into
+/// `dst`, with the byte count reported so callers can advance a scratch cursor.
+fn unescapeInto(raw: []const u8, quote: u8, dst: []u8) Error!struct { value: []const u8, written: usize } {
+    if (raw.len == 0 or raw[0] != quote) return .{ .value = raw, .written = 0 };
+    if (raw.len < 2 or raw[raw.len - 1] != quote) return Error.UnterminatedQuote;
+    const inner = raw[1 .. raw.len - 1];
+    if (std.mem.indexOfScalar(u8, inner, quote) == null) return .{ .value = inner, .written = 0 };
+    if (dst.len < inner.len) return Error.ScratchTooSmall;
+    var w: usize = 0;
+    var j: usize = 0;
+    while (j < inner.len) {
+        dst[w] = inner[j];
+        w += 1;
+        // A quote in `inner` is always the first of an escaped pair.
+        j += if (inner[j] == quote) 2 else 1;
+    }
+    return .{ .value = dst[0..w], .written = w };
+}
+
 /// Structural-scan ceiling: classify every chunk and count the field/record
 /// separators, doing no per-field work. This is the upper bound on what the
 /// vectorized pass can deliver; the gap between this and `SimdParser` throughput
 /// is the cost of the pull API plus quote materialization. Benchmark aid only.
 pub fn countSeparators(input: []const u8, opts: Options) u64 {
-    var base: usize = 0;
     var carry: u64 = 0;
     var total: u64 = 0;
+    var base: usize = 0;
     while (base < input.len) : (base += chunk_len) {
-        const n = @min(input.len - base, chunk_len);
-        var buf: [chunk_len]u8 = @splat(0);
-        @memcpy(buf[0..n], input[base..][0..n]);
-        const v: Vec = buf;
-        const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.quote)));
-        const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
-        const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
-        const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-        const inside = prefixXor(quote_bits) ^ carry;
-        carry = @bitCast(@as(i64, @bitCast(inside)) >> 63);
-        total += @popCount((delim_bits | lf_bits | cr_bits) & ~inside);
+        total += @popCount(classifyAt(input, base, opts, &carry));
     }
     return total;
 }
@@ -78,19 +124,7 @@ pub fn countSeparators(input: []const u8, opts: Options) u64 {
 /// returned slice is valid until the next call. Used by the callback API, where
 /// each field is consumed synchronously before the next is produced.
 fn materializeInto(raw: []const u8, quote: u8, scratch: []u8) Error![]const u8 {
-    if (raw.len == 0 or raw[0] != quote) return raw;
-    if (raw.len < 2 or raw[raw.len - 1] != quote) return Error.UnterminatedQuote;
-    const inner = raw[1 .. raw.len - 1];
-    if (std.mem.indexOfScalar(u8, inner, quote) == null) return inner;
-    if (scratch.len < inner.len) return Error.ScratchTooSmall;
-    var w: usize = 0;
-    var j: usize = 0;
-    while (j < inner.len) {
-        scratch[w] = inner[j];
-        w += 1;
-        j += if (inner[j] == quote) 2 else 1;
-    }
-    return scratch[0..w];
+    return (try unescapeInto(raw, quote, scratch)).value;
 }
 
 /// Push-style fast path: classify in 64-byte chunks and invoke `onField` for
@@ -114,37 +148,17 @@ pub fn forEachField(
     var base: usize = 0;
     var pending = false; // last separator was a delimiter → a field is owed
     while (base < input.len) : (base += chunk_len) {
-        const n = @min(input.len - base, chunk_len);
-        var buf: [chunk_len]u8 = @splat(0);
-        @memcpy(buf[0..n], input[base..][0..n]);
-        const v: Vec = buf;
-        const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(quote)));
-        const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(delim)));
-        const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
-        const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-        const inside = prefixXor(quote_bits) ^ carry;
-        carry = @bitCast(@as(i64, @bitCast(inside)) >> 63);
-
-        var s = (delim_bits | lf_bits | cr_bits) & ~inside;
+        var s = classifyAt(input, base, opts, &carry);
         while (s != 0) {
             const rel: usize = @ctz(s);
             s &= s - 1;
             const at = base + rel;
             if (at < field_start) continue; // trailing '\n' of a CRLF
-            const c = input[at];
             const value = try materializeInto(input[field_start..at], quote, scratch);
-            if (c == delim) {
-                field_start = at + 1;
-                pending = true;
-                onField(ctx, value, false);
-            } else {
-                field_start = if (c == '\r' and at + 1 < input.len and input[at + 1] == '\n')
-                    at + 2
-                else
-                    at + 1;
-                pending = false;
-                onField(ctx, value, true);
-            }
+            const step = recordStep(input, at, delim);
+            field_start = step.next_start;
+            pending = !step.last;
+            onField(ctx, value, step.last);
         }
     }
     if (field_start < input.len) {
@@ -201,53 +215,18 @@ pub const SimdParser = struct {
 
     /// Classify the next 64-byte chunk (zero-padded at EOF) into `structural`.
     fn loadChunk(self: *SimdParser) void {
-        const base = self.next_base;
-        const remaining = self.input.len - base;
-        const n = @min(remaining, chunk_len);
-
-        var buf: [chunk_len]u8 = @splat(0);
-        @memcpy(buf[0..n], self.input[base..][0..n]);
-        const v: Vec = buf;
-
-        const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(self.opts.quote)));
-        const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(self.opts.delimiter)));
-        const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
-        const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-
-        const inside = prefixXor(quote_bits) ^ self.carry;
-        // Broadcast the top bit: are we still inside a quote at the chunk's end?
-        self.carry = @bitCast(@as(i64, @bitCast(inside)) >> 63);
-
-        // Separators outside quoted regions. Padding bytes are 0, so they never
-        // match a separator and contribute no spurious bits.
-        self.structural = (delim_bits | lf_bits | cr_bits) & ~inside;
-        self.scan_base = base;
-        self.next_base = base + chunk_len;
+        self.structural = classifyAt(self.input, self.next_base, self.opts, &self.carry);
+        self.scan_base = self.next_base;
+        self.next_base += chunk_len;
     }
 
-    /// Turn a raw field slice into its value: unquoted fields are returned as-is
-    /// (zero-copy); quoted fields have their surrounding quotes stripped and any
-    /// `""` collapsed (zero-copy if there are none, else into scratch).
+    /// Turn a raw field slice into its value (see `unescapeInto`), advancing the
+    /// cumulative scratch cursor so multiple unescaped fields of one record stay
+    /// valid together.
     fn materialize(self: *SimdParser, raw: []const u8) Error![]const u8 {
-        const quote = self.opts.quote;
-        if (raw.len == 0 or raw[0] != quote) return raw;
-        if (raw.len < 2 or raw[raw.len - 1] != quote) return Error.UnterminatedQuote;
-
-        const inner = raw[1 .. raw.len - 1];
-        if (std.mem.indexOfScalar(u8, inner, quote) == null) return inner;
-
-        const dst = self.scratch[self.scratch_used..];
-        if (dst.len < inner.len) return Error.ScratchTooSmall;
-        var w: usize = 0;
-        var j: usize = 0;
-        while (j < inner.len) {
-            dst[w] = inner[j];
-            w += 1;
-            // A quote in `inner` is always the first of an escaped pair.
-            j += if (inner[j] == quote) 2 else 1;
-        }
-        self.scratch_used += w;
-        return dst[0..w];
+        const r = try unescapeInto(raw, self.opts.quote, self.scratch[self.scratch_used..]);
+        self.scratch_used += r.written;
+        return r.value;
     }
 
     pub fn next(self: *SimdParser) Error!?Field {
@@ -259,21 +238,11 @@ pub const SimdParser = struct {
                 // The trailing '\n' of a CRLF sits before field_start; skip it.
                 if (at < self.field_start) continue;
 
-                const c = self.input[at];
                 const value = try self.materialize(self.input[self.field_start..at]);
-                if (c == self.opts.delimiter) {
-                    self.field_start = at + 1;
-                    self.pending = true;
-                    return .{ .bytes = value, .last_in_record = false };
-                }
-                // record terminator: '\n', '\r', or "\r\n"
-                self.field_start =
-                    if (c == '\r' and at + 1 < self.input.len and self.input[at + 1] == '\n')
-                        at + 2
-                    else
-                        at + 1;
-                self.pending = false;
-                return .{ .bytes = value, .last_in_record = true };
+                const step = recordStep(self.input, at, self.opts.delimiter);
+                self.field_start = step.next_start;
+                self.pending = !step.last;
+                return .{ .bytes = value, .last_in_record = step.last };
             }
 
             if (self.next_base >= self.input.len) {
