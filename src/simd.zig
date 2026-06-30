@@ -1,29 +1,18 @@
-//! SIMD fast-path CSV parser.
+//! SIMD fast-path parsers, built on the chunk classifier in `classify.zig`.
 //!
-//! Same zero-allocation, pull-based contract as the scalar `csv.Parser`, but the
-//! structural scan is vectorized in 64-byte chunks following the simdjson/simdcsv
-//! approach (Langdale & Lemire):
+//! Two front-ends over the same vectorized structural scan:
+//!   * `forEachField` — push: classify each 64-byte chunk, pop separator bits
+//!     lowest-first with `@ctz`, and invoke a callback per field. Fully inlined,
+//!     no per-field call overhead.
+//!   * `SimdParser` — pull: the same scan exposed as a `next()`/`nextRecord()`
+//!     iterator, classifying one chunk on demand.
+//! Both are zero-allocation; `""` is collapsed only when a quoted field is
+//! materialized (`unescapeInto`).
 //!
-//!   1. Compare 64 input bytes against `"`, the delimiter, `\n`, `\r` in
-//!      parallel; `@bitCast` each `@Vector(64, bool)` result to a `u64` (this
-//!      lowers to a movemask on x86, a shrn trick on aarch64).
-//!   2. Turn the quote bitmask into an "inside a quoted region" mask with a
-//!      parallel prefix-XOR. We use the portable 6× shift-XOR doubling instead
-//!      of `PCLMULQDQ` (Zig has no carry-less-multiply builtin, and shift-XOR is
-//!      branchless and works on every target).
-//!   3. Real structure = (delimiter | `\n` | `\r`) AND NOT inside-quote. We then
-//!      pop those bits lowest-first with `@ctz`, emitting one field per bit —
-//!      no structural-index array, so this stays allocation-free.
-//!
-//! Escaped quotes (`""`) need no special case for *structure*: in the prefix-XOR
-//! they toggle the region off then immediately on again, so no separator between
-//! them is ever exposed. We collapse `""` only when materializing a quoted field.
-//!
-//! IMPORTANT — this parser assumes RFC 4180-strict quoting: a field containing a
-//! quote must be fully quoted. Unlike the scalar parser, a bare quote in the
-//! middle of an unquoted field is NOT treated as literal data here; the
-//! prefix-XOR would mask the rest of the input as in-string. Use `csv.Parser`
-//! for lenient input.
+//! IMPORTANT — these assume RFC 4180-strict quoting: a field containing a quote
+//! must be fully quoted. Unlike the scalar parser, a bare quote in the middle of
+//! an unquoted field is NOT treated as literal here (the prefix-XOR would mask
+//! the rest of the input as in-string). Use the scalar `Parser` for lenient input.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -32,65 +21,9 @@ pub const Options = types.Options;
 pub const Error = types.Error;
 pub const Field = types.Field;
 
-pub const chunk_len = 64;
-const Vec = @Vector(chunk_len, u8);
-
-/// Parallel prefix-XOR (inclusive scan) of a 64-bit mask: output bit i is the XOR
-/// of input bits 0..=i. Equivalent to the low word of a carry-less multiply by
-/// all-ones, but portable. After this, a bit is set wherever an odd number of
-/// quotes lie at or before it — i.e. "inside a quoted region".
-inline fn prefixXor(x: u64) u64 {
-    var r = x;
-    r ^= r << 1;
-    r ^= r << 2;
-    r ^= r << 4;
-    r ^= r << 8;
-    r ^= r << 16;
-    r ^= r << 32;
-    return r;
-}
-
-/// Load the chunk at `base`: a full 64 bytes directly (no copy) when available,
-/// otherwise the final short chunk zero-padded. Avoids a per-chunk memset+memcpy
-/// that otherwise dominates classification cost; padding bytes are 0, so they
-/// never match a separator.
-inline fn loadVec(input: []const u8, base: usize) Vec {
-    if (base + chunk_len <= input.len) return input[base..][0..chunk_len].*;
-    var buf: [chunk_len]u8 = @splat(0);
-    @memcpy(buf[0 .. input.len - base], input[base..]);
-    return buf;
-}
-
-/// "Inside a quoted region" bitmask for `v`, folding the end-of-chunk in-quote
-/// state into `carry` (0 or ~0). Single source of the prefix-XOR + carry logic.
-inline fn quoteInsideMask(v: Vec, quote: u8, carry: *u64) u64 {
-    const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(quote)));
-    const inside = prefixXor(quote_bits) ^ carry.*;
-    carry.* = @bitCast(@as(i64, @bitCast(inside)) >> 63);
-    return inside;
-}
-
-/// Field/record separators (delimiter, `\n`, `\r`) outside quoted regions, for
-/// the chunk at `base`.
-inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
-    const v = loadVec(input, base);
-    const inside = quoteInsideMask(v, opts.quote, carry);
-    const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
-    const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
-    const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-    return (delim_bits | lf_bits | cr_bits) & ~inside;
-}
-
-/// Record terminators (`\n`, `\r`) outside quoted regions, for the chunk at
-/// `base`. Used by streaming to find record boundaries without a separate scalar
-/// pass. (Delimiters are excluded — a record ends only on a newline.)
-pub inline fn terminatorsAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
-    const v = loadVec(input, base);
-    const inside = quoteInsideMask(v, opts.quote, carry);
-    const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
-    const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-    return (lf_bits | cr_bits) & ~inside;
-}
+const classify = @import("classify.zig");
+const classifyAt = classify.classifyAt;
+const chunk_len = classify.chunk_len;
 
 /// Given a separator at `at`, return where the next field starts and whether this
 /// separator ends a record. A delimiter continues the record (`last = false`);

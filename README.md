@@ -123,6 +123,23 @@ zig build test                          # unit tests
 zig build bench -Doptimize=ReleaseFast  # throughput benchmark
 ```
 
+## Source layout
+
+Layered so each concern is one small, independently testable module
+(types → classify → {scalar, simd, stream} → facade):
+
+| File | Lines | Role |
+|------|-------|------|
+| `types.zig`    | ~30  | `Options` / `Field` / `Error`, shared by every parser |
+| `classify.zig` | ~75  | SIMD chunk-classification primitives (the vector layer) |
+| `scalar.zig`   | ~190 | `Parser` — lenient byte-at-a-time, in-memory |
+| `simd.zig`     | ~230 | `SimdParser` (pull) + `forEachField` (push), built on `classify` |
+| `stream.zig`   | ~175 | `streamReader` + auto-selecting `parseReader` |
+| `csv.zig`      | ~40  | public API facade — re-exports only |
+
+Tests live in `*_test.zig` next to each module and are pulled into `zig build
+test` from `csv.zig`.
+
 ## How the SIMD path works
 
 Per 64-byte chunk (`@Vector(64, u8)`):

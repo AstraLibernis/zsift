@@ -20,6 +20,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const simd = @import("simd.zig");
+const classify = @import("classify.zig");
 
 const Reader = std.Io.Reader;
 
@@ -46,8 +47,8 @@ pub fn completeRecordsLen(window: []const u8, opts: Options) usize {
     var carry: u64 = 0;
     var last: usize = 0;
     var base: usize = 0;
-    while (base < window.len) : (base += simd.chunk_len) {
-        var t = simd.terminatorsAt(window, base, opts, &carry);
+    while (base < window.len) : (base += classify.chunk_len) {
+        var t = classify.terminatorsAt(window, base, opts, &carry);
         while (t != 0) {
             const hi: usize = 63 - @clz(t);
             if (resolveTerminator(window, base + hi)) |boundary| {
