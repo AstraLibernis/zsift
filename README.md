@@ -38,7 +38,8 @@ is always safe.
 - `\n`, `\r\n`, and a lone `\r` all terminate a record.
 
 A trailing newline does **not** produce a phantom empty record; a genuine blank
-line **does** parse as one empty field.
+line **does** parse as one empty field. A trailing delimiter yields a final empty
+field (`"a,"` → `["a", ""]`), matching RFC 4180 / Go / Python.
 
 ## Entry points
 
@@ -145,31 +146,31 @@ the region off then on again, exposing no separator between the pair. We collaps
 
 `ReleaseFast`, 16 MiB synthetic corpus, 8 columns, best of 7. Measured 2026-06-30
 on fedora-KDE, a **Hyper-V VM** (no GPU; i7-1365U, 6 vCPU = 3 physical cores +
-SMT) — VM numbers, not bare metal. "scan ceiling" is the vectorized classifier
-alone (popcount of separators, no per-field work) — the upper bound.
+SMT) — VM numbers, not bare metal, and run-to-run variance is ±10%. "scan ceiling"
+is the vectorized classifier alone (popcount of separators, no per-field work) —
+the upper bound.
 
-| profile | rows    | scalar | simd pull | simd push | stream | scan ceiling |
-|---------|---------|--------|-----------|-----------|--------|--------------|
-| clean   | 393,270 | 281    | 676       | **877**   | 382    | 2356         |
-| quoted  | 313,790 | 271    | 292       | **390**   | 220    | 2974         |
-| escapey | 219,941 | 318    | 329       | **397**   | 180    | 2769         |
+| profile | rows    | scalar | simd pull | simd push | stream  | scan ceiling |
+|---------|---------|--------|-----------|-----------|---------|--------------|
+| clean   | 393,270 | 269    | 554       | **1086**  | 922     | 8799         |
+| quoted  | 313,790 | 284    | 287       | **443**   | 406     | 10058        |
+| escapey | 219,941 | 280    | 264       | **375**   | 367     | 9294         |
 
 (MB/s; `stream` uses a 64 KiB window with real refills.) Reading the table:
 
-- The **vectorized scan runs at ~2.4–3.0 GB/s** — in simdcsv's ballpark (it cites
-  ~3.9 GB/s on native AVX2; this is a VM).
-- The **push API is up to ~3× the scalar parser** on clean data. The gap from
-  push to the scan ceiling is the irreducible cost of actually *extracting* each
-  field one at a time; closing it further needs AVX-512 bulk index extraction
-  (`VPCOMPRESS`), a much larger change.
+- The **vectorized scan runs at ~9–10 GB/s** (full chunks load directly into a
+  `@Vector`; only the final short chunk is zero-padded — the per-chunk memcpy is
+  gone).
+- The **push API is ~3–4× the scalar parser** on clean data. The gap from push to
+  the scan ceiling is the irreducible cost of actually *extracting* each field one
+  at a time; closing it further needs AVX-512 bulk index extraction (`VPCOMPRESS`),
+  a much larger change.
 - On **escapey** data the parser is *materialization-bound* (collapsing `""`),
   not scan-bound, so SIMD ≈ scalar. Honest result, not a regression: SIMD only
   helps when structural scanning is the bottleneck.
-- **Streaming** trades ~half the in-memory push throughput for bounded memory
-  (any file size in 64 KiB). It pays for a *separate scalar framing pass*
-  (`completeRecordsLen`) on top of the SIMD field pass; deriving the record
-  boundary from the SIMD classifier's own newline-outside-quotes bits would close
-  most of that gap (roadmap).
+- **Streaming** now runs close to in-memory push (clean 922 vs 1086) at bounded
+  memory (any file size in 64 KiB), since the record-framing pass is vectorized
+  too (`simd.terminatorsAt`) rather than a separate scalar scan.
 
 ## Prior art surveyed (2026-06-30)
 
@@ -197,8 +198,10 @@ alone (popcount of separators, no per-field work) — the upper bound.
 - [x] Streaming over a `std.Io.Reader` (records straddling buffer boundaries)
 - [x] Auto-selecting facade (slurp vs stream by size) — the allocating
       convenience layer over the zero-alloc core
-- [ ] SIMD record framing for streaming (reuse the classifier's newline bits
-      instead of a separate scalar `completeRecordsLen` pass)
+- [x] SIMD record framing for streaming (`simd.terminatorsAt` — no separate
+      scalar pass)
+- [x] Direct chunk loads (no per-chunk memcpy) + single `classify`/`unescape`
+      helpers
 - [ ] Bulk field-index extraction (AVX-512 `VPCOMPRESS` where available) to chase
       the scan ceiling
 - [ ] Vectorized `""` unescaping for the materialization-bound (escapey) case

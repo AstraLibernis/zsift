@@ -1,4 +1,4 @@
-//! zcsv — a zero-allocation, pull-based CSV parser for Zig.
+//! zsift — a zero-allocation, pull-based CSV/delimited-text parser for Zig.
 //!
 //! Design (see README): the parser operates on an in-memory `[]const u8` and
 //! never allocates. It hands back one `Field` at a time; the bytes of a field

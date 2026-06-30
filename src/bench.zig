@@ -1,4 +1,4 @@
-//! Throughput benchmark for the zcsv parser.
+//! Throughput benchmark for the zsift parser.
 //!
 //! Generates a deterministic corpus for several "profiles" (clean data, quoted
 //! data, escape-heavy data), parses each many times, and reports MB/s and
@@ -206,7 +206,7 @@ pub fn main() !void {
     var stream_scratch: [stream_window]u8 = undefined;
 
     const print = std.debug.print;
-    print("zcsv benchmark — corpus ~{d} MiB/profile, {d} cols, best of {d} ({d} KiB stream window)\n", .{ target_bytes >> 20, cols, iters, stream_window >> 10 });
+    print("zsift benchmark — corpus ~{d} MiB/profile, {d} cols, best of {d} ({d} KiB stream window)\n", .{ target_bytes >> 20, cols, iters, stream_window >> 10 });
     print("{s:<9} {s:>10} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{ "profile", "rows", "scalar", "simd pull", "simd push", "stream", "scan ceil" });
     print("{s:<9} {s:>10} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{ "", "", "MB/s", "MB/s", "MB/s", "MB/s", "MB/s" });
 
