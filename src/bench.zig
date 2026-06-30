@@ -199,8 +199,81 @@ fn measure(comptime P: type, corpus: []const u8, scratch: []u8, runs: usize) f64
 
 const stream_window = 64 * 1024;
 
-pub fn main() !void {
+/// Best-of-`runs` MB/s for the structural-scan ceiling (separator count, no
+/// per-field work). Factored out so single-shot mode can request it too.
+fn measureScan(corpus: []const u8, runs: usize) f64 {
+    var best_ns: u64 = std.math.maxInt(u64);
+    var i: usize = 0;
+    while (i < runs) : (i += 1) {
+        const t0 = nanoTime();
+        const seps = csv.simd.countSeparators(corpus, .{});
+        const dt = nanoTime() - t0;
+        std.mem.doNotOptimizeAway(seps);
+        if (dt < best_ns) best_ns = dt;
+    }
+    const secs = @as(f64, @floatFromInt(best_ns)) / 1e9;
+    const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
+    return mb / secs;
+}
+
+/// The selectable measurement paths, one per column of the human table.
+const PathSel = enum { scalar, pull, push, stream, ceil };
+
+fn parsePath(name: []const u8) ?PathSel {
+    inline for (.{ "scalar", "pull", "push", "stream", "ceil" }, std.enums.values(PathSel)) |n, v| {
+        if (std.mem.eql(u8, name, n)) return v;
+    }
+    return null;
+}
+
+fn parseProfile(name: []const u8) ?Profile {
+    for (profiles) |p| {
+        if (std.mem.eql(u8, std.mem.trimEnd(u8, p.name, " "), name)) return p;
+    }
+    return null;
+}
+
+/// Single (profile, path) measurement — the unit a benchfence driver gates and
+/// repeats. Each invocation does ONE best-of-`iters` measurement so the gate
+/// brackets a real measurement, then the driver picks best-across-reps.
+fn measureOne(alloc: std.mem.Allocator, prof: Profile, sel: PathSel) !f64 {
+    var scratch: [64 * 1024]u8 = undefined;
+    var window: [stream_window]u8 = undefined;
+    var stream_scratch: [stream_window]u8 = undefined;
+    const corpus = try generate(alloc, prof);
+    defer alloc.free(corpus);
+    return switch (sel) {
+        .scalar => measure(csv.Parser, corpus, &scratch, iters),
+        .pull => measure(csv.SimdParser, corpus, &scratch, iters),
+        .push => measureCallback(corpus, &scratch, iters),
+        .stream => measureStream(corpus, &window, &stream_scratch, iters),
+        .ceil => measureScan(corpus, iters),
+    };
+}
+
+pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.page_allocator;
+
+    // Single-shot mode for a benchfence driver: `bench <profile> <path>` runs ONE
+    // (profile, path) measurement and prints a machine-readable metric, so the
+    // driver controls iteration and gates each measurement (README "level 2").
+    // No args → the human table below (best-of-iters per cell, all paths).
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    if (argv.len >= 3) {
+        const prof = parseProfile(argv[1]) orelse {
+            std.debug.print("unknown profile '{s}' (clean|quoted|escapey)\n", .{argv[1]});
+            return error.BadProfile;
+        };
+        const sel = parsePath(argv[2]) orelse {
+            std.debug.print("unknown path '{s}' (scalar|pull|push|stream|ceil)\n", .{argv[2]});
+            return error.BadPath;
+        };
+        const mbps = try measureOne(alloc, prof, sel);
+        // benchfence/driver reads this exact key (lib/driver.nu metric_of).
+        std.debug.print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
+        return;
+    }
+
     var scratch: [64 * 1024]u8 = undefined;
     var window: [stream_window]u8 = undefined;
     var stream_scratch: [stream_window]u8 = undefined;

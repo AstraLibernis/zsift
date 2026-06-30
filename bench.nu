@@ -1,58 +1,51 @@
 #!/usr/bin/env nu
-# Trust-gated benchmark for zsift.
+# Trust-gated benchmark for zsift — a benchfence level-2 DRIVER script.
 #
-# Builds the bench (ReleaseFast) and runs it under *benchfence*, which pins the
-# run to a quiet physical core (ASLR off, perf governor where available) and takes
-# a calibration before and after. We accept a run's numbers ONLY when both
-# calibrations sit within tolerance of the venue floor — i.e. the whole run
-# happened at the machine's idle speed. On a contended shared VM that may take a
-# few tries; if no quiet window appears, we still print the best-effort run but
-# banner it UNTRUSTWORTHY rather than pretending VM noise is signal.
+# Each (profile, path) pair is a "unit". benchfence's driver (`lib/driver.nu`
+# `drive`) GATES and repeats each unit's measurement: before every measurement it
+# proves the pinned core is back at its idle speed, takes the measurement, then
+# post-checks that the core stayed idle — discarding and re-measuring a sample the
+# machine spoiled mid-flight. That is per-sample trust ("level 2"), not the old
+# wrap-the-whole-binary-and-check-pre/post-drift approximation ("level 1") this
+# file used to hand-roll. The benchmark binary's single-shot mode
+# (`bench <profile> <path>` → `BENCHFENCE_METRIC=…`) is what lets the driver own
+# the iteration; the human table (`bench` with no args) is unchanged.
 #
 # benchfence is an external dependency (https://codeberg.org/AstraLibernis/benchfence).
-# Point ZSIFT_BENCHFENCE at the executable, or keep it at ~/projects/benchfence.
+# Set ZSIFT_BENCHFENCE_HOME to its checkout, or keep it at ~/projects/benchfence.
 #
-#   nu bench.nu                 # up to 6 attempts to catch a quiet window
-#   nu bench.nu --attempts 12
+# Usage (two steps — building is NOT done inside the fenced run, on purpose):
+#   zig build -Doptimize=ReleaseFast
+#   benchfence --run bench.nu --reps 20
+#   benchfence --referee-cmd "$BF/referee/zig-out/bin/referee compute" --run bench.nu   # faster, steadier gate
+#
+# Run it WITHOUT benchfence and it still measures — ungated and loudly flagged.
 
-def main [--attempts: int = 6] {
-    let repo = $env.FILE_PWD
-    let bf = ($env.ZSIFT_BENCHFENCE? | default $"($env.HOME)/projects/benchfence/benchfence")
-    if not ($bf | path exists) {
-        error make {msg: $"benchfence not found at ($bf); clone it or set ZSIFT_BENCHFENCE"}
+const BF_HOME = "/home/astralibernis/projects/benchfence"
+use /home/astralibernis/projects/benchfence/lib/driver.nu *
+
+def bench_bin [] {
+    let b = (($env.FILE_PWD? | default (pwd)) | path join zig-out bin bench)
+    if not ($b | path exists) {
+        error make {msg: $"build first: `zig build -Doptimize=ReleaseFast` \(missing ($b)\)"}
     }
+    $b
+}
 
-    cd $repo
-    print "building bench (ReleaseFast)…"
-    ^zig build -Doptimize=ReleaseFast
-    let bin = ($repo | path join zig-out bin bench)
-
-    mut runs = []
-    for attempt in 1..$attempts {
-        let work = (mktemp -d)
-        cd $work
-        ^$bf $bin
-        cd $repo
-        let fj = (glob ($work | path join "out/**/*.fence.json") | first)
-        let v = (open $fj)
-        let bar = ($v.floor_ms * (1.0 + ($v.tolerance / 100.0)))
-        let quiet = ($v.pre_ms <= $bar and $v.post_ms <= $bar)
-        let logpath = ($work | path join $v.log) # v.log is relative to the run cwd
-        let table = (open $logpath | lines | where ($it =~ '(?i)profile|MB/s|clean|quoted|escapey') | str join "\n")
-
-        if $quiet {
-            print $"\n✅ TRUSTWORTHY — both cals at idle: pre ($v.pre_ms) ms, post ($v.post_ms) ms ≤ bar (($bar | math round)) ms \(floor ($v.floor_ms), tol ($v.tolerance)%, drift ($v.drift_pct)%\)"
-            print $table
-            return
+# units = every profile × every parser path. Each unit's closure runs ONE
+# single-shot measurement of the bench binary; `pinned` runs it (pinning/ASLR are
+# inherited from the benchfence wrap) and reads back its BENCHFENCE_METRIC.
+def units [] {
+    let bin = (bench_bin)
+    let profiles = [clean quoted escapey]
+    let paths = [scalar pull push stream]   # ceil is a structural scan ceiling, not a parser path
+    $profiles | each {|p|
+        $paths | each {|path|
+            {name: $"($p)/($path)", do: {|core| pinned $core [$bin $p $path] }}
         }
+    } | flatten
+}
 
-        print $"attempt ($attempt)/($attempts): contended — pre ($v.pre_ms) / post ($v.post_ms) ms vs floor ($v.floor_ms) ms \(drift ($v.drift_pct)%\); retrying"
-        $runs = ($runs | append {v: $v, table: $table})
-    }
-
-    let best = ($runs | sort-by v.drift_pct | first)
-    print $"\n⚠️  UNTRUSTWORTHY — no quiet window in ($attempts) attempts; the VM is contended."
-    print $"   best-effort run: pre ($best.v.pre_ms) / post ($best.v.post_ms) ms vs floor ($best.v.floor_ms) ms \(drift ($best.v.drift_pct)%\)"
-    print "   relative ordering across parsers is still meaningful; absolutes are not."
-    print $best.table
+def main [--reps: int = 20] {
+    drive (units) --reps $reps --metric "MB/s" --direction higher | ignore
 }
