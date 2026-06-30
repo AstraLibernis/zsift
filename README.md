@@ -163,9 +163,12 @@ the region off then on again, exposing no separator between the pair. We collaps
 
 `ReleaseFast`, 16 MiB synthetic corpus, 8 columns, best of 7. Measured 2026-06-30
 on fedora-KDE, a **Hyper-V VM** (no GPU; i7-1365U, 6 vCPU = 3 physical cores +
-SMT) — VM numbers, not bare metal, and run-to-run variance is ±10%. "scan ceiling"
-is the vectorized classifier alone (popcount of separators, no per-field work) —
-the upper bound.
+SMT) — VM numbers, not bare metal. **Raw `zig build bench` swings ±30%+ run-to-run**
+because the host steals CPU unpredictably; only `nu bench.nu` runs (see
+[Trustworthy benchmarking](#trustworthy-benchmarking)) and within-run *relative*
+ordering are meaningful — treat the absolutes below as a single un-certified
+sample. "scan ceiling" is the vectorized classifier alone (popcount of separators,
+no per-field work) — the upper bound.
 
 | profile | rows    | scalar | simd pull | simd push | stream  | scan ceiling |
 |---------|---------|--------|-----------|-----------|---------|--------------|
@@ -188,6 +191,29 @@ the upper bound.
 - **Streaming** now runs close to in-memory push (clean 922 vs 1086) at bounded
   memory (any file size in 64 KiB), since the record-framing pass is vectorized
   too (`simd.terminatorsAt`) rather than a separate scalar scan.
+
+## Trustworthy benchmarking
+
+This is a shared Hyper-V VM; the host steals CPU unpredictably, so `zig build
+bench` swings 30%+ between identical runs. `nu bench.nu` filters that:
+
+```sh
+nu bench.nu              # build + run under benchfence, certify only idle-speed runs
+nu bench.nu --attempts 12
+```
+
+It runs the bench under [benchfence](https://codeberg.org/AstraLibernis/benchfence)
+(pins to a quiet physical core, ASLR off, perf governor, quiets the desktop) and
+takes a calibration before and after. A run's numbers are **certified only when
+both calibrations sit within tolerance of the venue's measured floor** — i.e. the
+whole run happened at the machine's idle speed. Note that low *drift* alone isn't
+enough: a uniformly-busy machine reads stable-but-slow, so the gate compares
+against the floor, not just pre-vs-post. On a contended VM it retries; if no quiet
+window appears it still prints the best-effort run, but bannered UNTRUSTWORTHY.
+
+benchfence is an external dependency (set `ZSIFT_BENCHFENCE` or keep it at
+`~/projects/benchfence`). The deeper *per-measurement* gating (`fence.nu`: wait
+for quiet before each measurement, retry contended ones) is a possible follow-up.
 
 ## Prior art surveyed (2026-06-30)
 
