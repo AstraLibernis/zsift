@@ -120,8 +120,9 @@ they agree on every field.
 ## Build
 
 ```sh
-zig build test                          # unit tests
-zig build bench -Doptimize=ReleaseFast  # throughput benchmark
+zig build test                             # unit tests
+zig build bench -Doptimize=ReleaseFast     # throughput benchmark
+zig build experiment -Doptimize=ReleaseFast # method-selection bake-off (EXPERIMENTS.md)
 ```
 
 ## Source layout
@@ -138,7 +139,9 @@ Layered so each concern is one small, independently testable module
 | `stream.zig`   | ~175 | `streamReader` + auto-selecting `parseReader` |
 | `csv.zig`      | ~40  | public API facade — re-exports only |
 
-Tests live in `*_test.zig` next to each module and are pulled into `zig build
+Tests live in `csv_test.zig` / `simd_test.zig` / `stream_test.zig` (the small
+leaf modules `types`/`classify`/`scalar` are covered by `csv_test.zig`) and are
+pulled into `zig build
 test` from `csv.zig`.
 
 ## How the SIMD path works
@@ -165,8 +168,8 @@ the region off then on again, exposing no separator between the pair. We collaps
 Absolute throughput is machine-specific and, on a shared VM, swings ±30% with host
 contention — so the durable facts here are *ratios* and the *method choices*, not a
 frozen table. Run `zig build experiment` for current numbers on your own box (see
-[EXPERIMENTS.md](EXPERIMENTS.md)). Measured on a Hyper-V VM (no GPU; i7-1365U, AVX2),
-relative to zsift's own scalar parser on the same data:
+[EXPERIMENTS.md](EXPERIMENTS.md)). Measured 2026-07-01 on a Hyper-V VM (no GPU;
+i7-1365U, AVX2), relative to zsift's own scalar parser on the same data:
 
 - The **push (callback) fast path runs ~2.5–3.5× the scalar parser** on real CSV, and
   reaches roughly **40% of the structural-scan ceiling** (the classifier alone, no
@@ -179,7 +182,7 @@ relative to zsift's own scalar parser on the same data:
 - **Pull delivery** has two shapes: `next()` (one field per call) and `nextInto()`
   (a batch per call, holding scan state in registers to amortize the per-call cost).
   **Streaming** runs close to in-memory push at bounded memory (any file in 64 KiB),
-  since record framing is vectorized too (`simd.terminatorsAt`).
+  since record framing is vectorized too (`classify.terminatorsAt`).
 
 Which technique wins at each stage — detect an escape, collapse it, chunk width,
 delivery shape — was chosen by a reproducible bake-off, not by guessing: `zig build
@@ -205,9 +208,11 @@ enough: a uniformly-busy machine reads stable-but-slow, so the gate compares
 against the floor, not just pre-vs-post. On a contended VM it retries; if no quiet
 window appears it still prints the best-effort run, but bannered UNTRUSTWORTHY.
 
-benchfence is an external dependency (set `ZSIFT_BENCHFENCE` or keep it at
-`~/projects/benchfence`). The deeper *per-measurement* gating (`fence.nu`: wait
-for quiet before each measurement, retry contended ones) is a possible follow-up.
+benchfence is an external dependency. `bench.nu` / `matrix-bench.nu` currently
+`use` it from a hardcoded `~/projects/benchfence`; point them elsewhere by editing
+that path at the top of each script. The deeper *per-measurement* gating
+(`fence.nu`: wait for quiet before each measurement, retry contended ones) is a
+possible follow-up.
 
 ## Prior art surveyed (2026-06-30)
 
@@ -235,7 +240,7 @@ for quiet before each measurement, retry contended ones) is a possible follow-up
 - [x] Streaming over a `std.Io.Reader` (records straddling buffer boundaries)
 - [x] Auto-selecting facade (slurp vs stream by size) — the allocating
       convenience layer over the zero-alloc core
-- [x] SIMD record framing for streaming (`simd.terminatorsAt` — no separate
+- [x] SIMD record framing for streaming (`classify.terminatorsAt` — no separate
       scalar pass)
 - [x] Direct chunk loads (no per-chunk memcpy) + single `classify`/`unescape`
       helpers

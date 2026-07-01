@@ -12,7 +12,8 @@
 # the iteration; the human table (`bench` with no args) is unchanged.
 #
 # benchfence is an external dependency (https://codeberg.org/AstraLibernis/benchfence).
-# Set ZSIFT_BENCHFENCE_HOME to its checkout, or keep it at ~/projects/benchfence.
+# The `use` path below is hardcoded to ~/projects/benchfence; edit it if yours differs
+# (nushell `use` needs a literal path, so it can't read an env var).
 #
 # Usage (two steps — building is NOT done inside the fenced run, on purpose):
 #   zig build -Doptimize=ReleaseFast
@@ -26,7 +27,6 @@
 #
 # Run it WITHOUT benchfence and it still measures — ungated and loudly flagged.
 
-const BF_HOME = "/home/astralibernis/projects/benchfence"
 use /home/astralibernis/projects/benchfence/lib/driver.nu *
 
 def bench_bin [] {

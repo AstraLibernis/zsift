@@ -168,9 +168,9 @@ test "simd: differential fuzz — push and pull match generated fields" {
     // Generate random well-formed RFC-4180 CSV together with the exact field
     // values it encodes, then assert both the push (`forEachField`) and pull
     // (`SimdParser`) paths reproduce them. Fields range up to 129 bytes, so many
-    // straddle a 64-byte chunk — exercising both the popcount fast path and the
-    // `indexOfScalar` straddle fallback in `interiorQuote`. This is the guard
-    // against the mask-based escape detection ever diverging from a byte re-scan.
+    // straddle a 64-byte chunk — exercising the cross-chunk quote-count
+    // accumulator that decides escaping. This is the guard against the mask-based
+    // escape detection ever diverging from a byte-level re-scan.
     const alloc = testing.allocator;
     var seed: u64 = 0;
     while (seed < 400) : (seed += 1) {

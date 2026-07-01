@@ -62,8 +62,8 @@ inline fn quoteInsideMask(v: Vec, quote: u8, carry: *u64) u64 {
 
 /// Separators plus the chunk's quote bitmask. `quotes` lets a parser decide, per
 /// field, whether it holds an escaped `""` by popcounting the quote bits inside
-/// the field's range — avoiding a byte-level re-scan of every quoted field (see
-/// `simd.interiorQuote`).
+/// the field's range — avoiding a byte-level re-scan of every quoted field (the
+/// cross-chunk quote-count accumulator in `simd.forEachField`/`SimdParser`).
 pub const Classified = struct { seps: u64, quotes: u64 };
 
 /// Field/record separators (delimiter, `\n`, `\r`) outside quoted regions, for

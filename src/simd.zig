@@ -4,10 +4,17 @@
 //!   * `forEachField` — push: classify each 64-byte chunk, pop separator bits
 //!     lowest-first with `@ctz`, and invoke a callback per field. Fully inlined,
 //!     no per-field call overhead.
-//!   * `SimdParser` — pull: the same scan exposed as a `next()`/`nextRecord()`
-//!     iterator, classifying one chunk on demand.
+//!   * `SimdParser` — pull: the same scan exposed as a `next()`/`nextRecord()`/
+//!     `nextInto()` iterator, classifying one chunk on demand.
 //! Both are zero-allocation; `""` is collapsed only when a quoted field is
 //! materialized (`unescapeInto`).
+//!
+//! Size note (reviewed 2026-07-01, kept whole): this file is one algorithm — the
+//! vectorized scan plus the `quotes_up_to - field_quotes > 2` escape accounting —
+//! deliberately hand-inlined three ways (`forEachField`, `next`, `nextInto`) for
+//! zero per-field call overhead. Splitting push from pull would fragment that
+//! shared logic and make the three copies harder to keep in sync, so it stays one
+//! module despite exceeding the ~300-line guideline.
 //!
 //! IMPORTANT — these assume RFC 4180-strict quoting: a field containing a quote
 //! must be fully quoted. Unlike the scalar parser, a bare quote in the middle of
@@ -249,6 +256,11 @@ pub const SimdParser = struct {
         return r.value;
     }
 
+    /// Next field, or null at end of input. Unescaped (`""`) fields accumulate in
+    /// `scratch` and are freed only by `resetScratch()` (or `nextRecord`, which
+    /// calls it per record). A caller looping on `next()` directly over many
+    /// escaped fields must call `resetScratch()` itself once prior fields are
+    /// consumed, or size `scratch` for all live unescaped bytes.
     pub fn next(self: *SimdParser) Error!?Field {
         while (true) {
             if (self.structural != 0) {
@@ -316,7 +328,9 @@ pub const SimdParser = struct {
     /// struct only once — amortizing the per-field state round-trip `next()` pays.
     /// Scratch is cumulative across the batch (as with a record); call `resetScratch`
     /// between batches, or size scratch to hold a batch's unescaped bytes.
+    /// `dst` must be non-empty (a returned 0 means end of input, not "no room").
     pub fn nextInto(self: *SimdParser, dst: []Field) Error!usize {
+        std.debug.assert(dst.len > 0);
         const quote = self.opts.quote;
         const delim = self.opts.delimiter;
         var structural = self.structural;

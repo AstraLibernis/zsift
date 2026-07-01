@@ -35,6 +35,8 @@ which proves the core was at its idle baseline before and after every sample.
 
 Directions below are relative to the current parser; absolute figures are from a
 Hyper-V VM (i7-1365U, AVX2, no AVX-512), 2026-07-01, and will differ elsewhere.
+(The tool prints four stations, `STATION 1/4`…`4/4`: it fuses CHECK + FIX below
+into one `DETECT × COLLAPSE` matrix — the two dimensions are measured together.)
 
 ### 1. CHECK — detect an escaped `""` (`detect`)
 Candidates: `rescan` (re-scan the field bytes with `indexOfScalar`), `swar`
