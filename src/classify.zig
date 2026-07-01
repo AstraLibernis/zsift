@@ -44,14 +44,27 @@ inline fn loadVec(input: []const u8, base: usize) Vec {
     return buf;
 }
 
-/// "Inside a quoted region" bitmask for `v`, folding the end-of-chunk in-quote
-/// state into `carry` (0 or ~0). Single source of the prefix-XOR + carry logic.
-inline fn quoteInsideMask(v: Vec, quote: u8, carry: *u64) u64 {
+/// Quote bitmask plus the "inside a quoted region" bitmask for `v`, folding the
+/// end-of-chunk in-quote state into `carry` (0 or ~0). Single source of the
+/// prefix-XOR + carry logic; `quotes` is the raw movemask of quote positions.
+inline fn quoteBitsAndInside(v: Vec, quote: u8, carry: *u64) struct { quotes: u64, inside: u64 } {
     const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(quote)));
     const inside = prefixXor(quote_bits) ^ carry.*;
     carry.* = @bitCast(@as(i64, @bitCast(inside)) >> 63);
-    return inside;
+    return .{ .quotes = quote_bits, .inside = inside };
 }
+
+/// "Inside a quoted region" bitmask (discards the quote positions). Used where
+/// only the region matters (the record-terminator scan).
+inline fn quoteInsideMask(v: Vec, quote: u8, carry: *u64) u64 {
+    return quoteBitsAndInside(v, quote, carry).inside;
+}
+
+/// Separators plus the chunk's quote bitmask. `quotes` lets a parser decide, per
+/// field, whether it holds an escaped `""` by popcounting the quote bits inside
+/// the field's range — avoiding a byte-level re-scan of every quoted field (see
+/// `simd.interiorQuote`).
+pub const Classified = struct { seps: u64, quotes: u64 };
 
 /// Field/record separators (delimiter, `\n`, `\r`) outside quoted regions, for
 /// the chunk at `base`.
@@ -62,6 +75,17 @@ pub inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *
     const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
     const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
     return (delim_bits | lf_bits | cr_bits) & ~inside;
+}
+
+/// Like `classifyAt`, but also returns the chunk's quote bitmask, so a parser can
+/// detect a field's escaped `""` from bits already computed instead of re-scanning.
+pub inline fn classifyAtFull(input: []const u8, base: usize, opts: Options, carry: *u64) Classified {
+    const v = loadVec(input, base);
+    const qi = quoteBitsAndInside(v, opts.quote, carry);
+    const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
+    const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
+    const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
+    return .{ .seps = (delim_bits | lf_bits | cr_bits) & ~qi.inside, .quotes = qi.quotes };
 }
 
 /// Record terminators (`\n`, `\r`) outside quoted regions, for the chunk at
