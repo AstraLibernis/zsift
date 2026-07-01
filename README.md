@@ -189,15 +189,15 @@ experiment` runs the whole grid on generated light/heavy corpora, and
 ## Trustworthy benchmarking
 
 This is a shared Hyper-V VM; the host steals CPU unpredictably, so `zig build
-bench` swings 30%+ between identical runs. `nu bench.nu` filters that:
+bench` swings 30%+ between identical runs. Gate each sample through benchfence:
 
 ```sh
-nu bench.nu              # build + run under benchfence, certify only idle-speed runs
-nu bench.nu --attempts 12
+zig build -Doptimize=ReleaseFast
+benchfence --bound mem --run bench.nu --reps 20
 ```
 
-It runs the bench under [benchfence](https://codeberg.org/AstraLibernis/benchfence)
-(pins to a quiet physical core, ASLR off, perf governor, quiets the desktop) and
+`bench.nu` is a benchfence level-2 driver, run under [benchfence](https://codeberg.org/AstraLibernis/benchfence)
+(pins to a quiet physical core, ASLR off, perf governor, quiets the desktop), which
 takes a calibration before and after. A run's numbers are **certified only when
 both calibrations sit within tolerance of the venue's measured floor** — i.e. the
 whole run happened at the machine's idle speed. Note that low *drift* alone isn't
