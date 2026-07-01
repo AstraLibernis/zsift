@@ -48,7 +48,8 @@ The in-memory parsers are zero-allocation and share `Options` / `Field` / `Error
 | Use | Type / fn | Source | Quoting | Notes |
 |-----|-----------|--------|---------|-------|
 | Lenient, byte-exact | `zsift.Parser` | slice | relaxed (bare quote = literal) | scalar DFA |
-| Fast, pull | `zsift.SimdParser` | slice | RFC-4180 strict | vectorized, same `next()` API |
+| Fast, pull | `zsift.SimdParser` | slice | RFC-4180 strict | vectorized, `next()` API |
+| Fast, pull (batched) | `zsift.SimdParser.nextInto` | slice | RFC-4180 strict | a batch of fields per call; amortizes the per-`next()` cost |
 | Fastest, push | `zsift.simd.forEachField` | slice | RFC-4180 strict | inlined callback, no per-field call |
 | Streaming | `zsift.streamReader` | `*std.Io.Reader` | RFC-4180 strict | bounded memory, push callback |
 | Auto | `zsift.parseReader` | `*std.Io.Reader` | RFC-4180 strict | picks slurp vs stream by size |
@@ -131,9 +132,9 @@ Layered so each concern is one small, independently testable module
 | File | Lines | Role |
 |------|-------|------|
 | `types.zig`    | ~30  | `Options` / `Field` / `Error`, shared by every parser |
-| `classify.zig` | ~75  | SIMD chunk-classification primitives (the vector layer) |
+| `classify.zig` | ~100 | SIMD chunk-classification primitives (the vector layer) |
 | `scalar.zig`   | ~190 | `Parser` — lenient byte-at-a-time, in-memory |
-| `simd.zig`     | ~230 | `SimdParser` (pull) + `forEachField` (push), built on `classify` |
+| `simd.zig`     | ~395 | `SimdParser` (pull / `nextInto`) + `forEachField` (push); mask-based escape detect + run-based `""` collapse |
 | `stream.zig`   | ~175 | `streamReader` + auto-selecting `parseReader` |
 | `csv.zig`      | ~40  | public API facade — re-exports only |
 
@@ -161,36 +162,29 @@ the region off then on again, exposing no separator between the pair. We collaps
 
 ## Numbers
 
-`ReleaseFast`, 16 MiB synthetic corpus, 8 columns, best of 7. Measured 2026-06-30
-on fedora-KDE, a **Hyper-V VM** (no GPU; i7-1365U, 6 vCPU = 3 physical cores +
-SMT) — VM numbers, not bare metal. **Raw `zig build bench` swings ±30%+ run-to-run**
-because the host steals CPU unpredictably; only `nu bench.nu` runs (see
-[Trustworthy benchmarking](#trustworthy-benchmarking)) and within-run *relative*
-ordering are meaningful — treat the absolutes below as a single un-certified
-sample. "scan ceiling" is the vectorized classifier alone (popcount of separators,
-no per-field work) — the upper bound.
+Absolute throughput is machine-specific and, on a shared VM, swings ±30% with host
+contention — so the durable facts here are *ratios* and the *method choices*, not a
+frozen table. Run `zig build experiment` for current numbers on your own box (see
+[EXPERIMENTS.md](EXPERIMENTS.md)). Measured on a Hyper-V VM (no GPU; i7-1365U, AVX2),
+relative to zsift's own scalar parser on the same data:
 
-| profile | rows    | scalar | simd pull | simd push | stream  | scan ceiling |
-|---------|---------|--------|-----------|-----------|---------|--------------|
-| clean   | 393,270 | 269    | 554       | **1086**  | 922     | 8799         |
-| quoted  | 313,790 | 284    | 287       | **443**   | 406     | 10058        |
-| escapey | 219,941 | 280    | 264       | **375**   | 367     | 9294         |
+- The **push (callback) fast path runs ~2.5–3.5× the scalar parser** on real CSV, and
+  reaches roughly **40% of the structural-scan ceiling** (the classifier alone, no
+  field extraction). The remaining gap is the unavoidable cost of *delivering* each
+  field — slicing it out, the per-field loop — not the escape handling.
+- **Escaped `""` is no longer a bottleneck.** The escape decision is read from the
+  SIMD quote mask (no per-field byte re-scan), and the collapse copies clean runs
+  with `@memcpy` (SWAR-found run boundaries) rather than a byte-at-a-time loop — so
+  escape-heavy CSV stays fast instead of dropping toward scalar speed.
+- **Pull delivery** has two shapes: `next()` (one field per call) and `nextInto()`
+  (a batch per call, holding scan state in registers to amortize the per-call cost).
+  **Streaming** runs close to in-memory push at bounded memory (any file in 64 KiB),
+  since record framing is vectorized too (`simd.terminatorsAt`).
 
-(MB/s; `stream` uses a 64 KiB window with real refills.) Reading the table:
-
-- The **vectorized scan runs at ~9–10 GB/s** (full chunks load directly into a
-  `@Vector`; only the final short chunk is zero-padded — the per-chunk memcpy is
-  gone).
-- The **push API is ~3–4× the scalar parser** on clean data. The gap from push to
-  the scan ceiling is the irreducible cost of actually *extracting* each field one
-  at a time; closing it further needs AVX-512 bulk index extraction (`VPCOMPRESS`),
-  a much larger change.
-- On **escapey** data the parser is *materialization-bound* (collapsing `""`),
-  not scan-bound, so SIMD ≈ scalar. Honest result, not a regression: SIMD only
-  helps when structural scanning is the bottleneck.
-- **Streaming** now runs close to in-memory push (clean 922 vs 1086) at bounded
-  memory (any file size in 64 KiB), since the record-framing pass is vectorized
-  too (`simd.terminatorsAt`) rather than a separate scalar scan.
+Which technique wins at each stage — detect an escape, collapse it, chunk width,
+delivery shape — was chosen by a reproducible bake-off, not by guessing: `zig build
+experiment` runs the whole grid on generated light/heavy corpora, and
+[EXPERIMENTS.md](EXPERIMENTS.md) records the method and what won.
 
 ## Trustworthy benchmarking
 
@@ -231,8 +225,8 @@ for quiet before each measurement, retry contended ones) is a possible follow-up
 - **SIMD frontier** — [geofflangdale/simdcsv](https://github.com/geofflangdale/simdcsv),
   [liquidaty/zsv](https://github.com/liquidaty/zsv): simdjson-style. Find all
   structural bytes (quotes, commas, newlines) per 64-byte chunk with vector
-  compares, then a branchless prefix-XOR carry masks separators inside quotes.
-  ~3.9 GB/s with AVX2.
+  compares, then a branchless prefix-XOR carry masks separators inside quotes —
+  the same approach zsift re-derived here.
 
 ## Roadmap
 
@@ -245,7 +239,11 @@ for quiet before each measurement, retry contended ones) is a possible follow-up
       scalar pass)
 - [x] Direct chunk loads (no per-chunk memcpy) + single `classify`/`unescape`
       helpers
-- [ ] Bulk field-index extraction (AVX-512 `VPCOMPRESS` where available) to chase
-      the scan ceiling
-- [ ] Vectorized `""` unescaping for the materialization-bound (escapey) case
+- [x] Mask-based escape detection + run-based (`@memcpy` / SWAR) `""` collapse —
+      escape-heavy CSV is no longer materialization-bound
+- [x] Batched pull (`nextInto`) to amortize the per-call iterator cost
+- [x] Reproducible method-selection experiment (`zig build experiment`) + write-up
+- [ ] Reduce field-delivery overhead — the remaining gap to the scan ceiling is
+      slicing and handing back each field, not scanning
+- [ ] Multi-core parsing (split at safe record boundaries) — single-threaded today
 - [ ] Options: lazy quotes, skip-blank-lines, comment lines, trimming
