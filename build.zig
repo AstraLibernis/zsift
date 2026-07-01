@@ -38,4 +38,11 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_bench.addArgs(args);
     const bench_step = b.step("bench", "Run the throughput benchmark");
     bench_step.dependOn(&run_bench.step);
+
+    // `zig build experiment` — the reproducible method-selection suite (see
+    // EXPERIMENTS.md). Self-contained: generates its own corpora.
+    const run_exp = b.addRunArtifact(bench);
+    run_exp.addArg("experiment");
+    const exp_step = b.step("experiment", "Run the method-selection experiment (why zsift chose its methods)");
+    exp_step.dependOn(&run_exp.step);
 }

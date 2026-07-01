@@ -9,6 +9,7 @@
 const std = @import("std");
 const csv = @import("csv");
 const methods = @import("methods.zig");
+const experiment = @import("experiment.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -198,6 +199,32 @@ fn measure(comptime P: type, corpus: []const u8, scratch: []u8, runs: usize) f64
     return mb / secs;
 }
 
+/// Best-of-`runs` MB/s for the batched pull API (`SimdParser.nextInto`), reading a
+/// bounded batch of fields per call and resetting scratch per batch.
+fn measurePullBatch(corpus: []const u8, scratch: []u8, runs: usize) f64 {
+    var best_ns: u64 = std.math.maxInt(u64);
+    var i: usize = 0;
+    while (i < runs) : (i += 1) {
+        var p = csv.SimdParser.init(corpus, scratch, .{});
+        var fbuf: [64]csv.Field = undefined;
+        var sum: u64 = 0;
+        const t0 = nanoTime();
+        while (true) {
+            const got = p.nextInto(&fbuf) catch |e|
+                std.debug.panic("nextInto failed on well-formed corpus: {s}", .{@errorName(e)});
+            if (got == 0) break;
+            for (fbuf[0..got]) |f| sum +%= f.bytes.len;
+            p.resetScratch(); // keep scratch batch-local
+        }
+        const dt = nanoTime() - t0;
+        std.mem.doNotOptimizeAway(sum);
+        if (dt < best_ns) best_ns = dt;
+    }
+    const secs = @as(f64, @floatFromInt(best_ns)) / 1e9;
+    const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
+    return mb / secs;
+}
+
 const stream_window = 64 * 1024;
 
 /// Best-of-`runs` MB/s for the structural-scan ceiling (separator count, no
@@ -285,6 +312,13 @@ pub fn main(init: std.process.Init) !void {
 
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
+    // `bench experiment` — the full method-selection suite on self-generated
+    // corpora (no $ZSIFT_CORPUS needed). Also `zig build experiment`.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "experiment")) {
+        try experiment.runExperiment(alloc);
+        return;
+    }
+
     // `bench matrix` (with $ZSIFT_CORPUS) runs the DETECT × COLLAPSE experiment
     // grid over the whole corpus instead of the normal report.
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "matrix")) {
@@ -293,6 +327,47 @@ pub fn main(init: std.process.Init) !void {
             return error.NoCorpus;
         };
         try methods.runMatrix(corpus, alloc);
+        return;
+    }
+
+    // `bench project` — campaign axis: eager vs lazy collapse under projection.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "project")) {
+        const corpus = real orelse {
+            print("project mode needs $ZSIFT_CORPUS set to a CSV file\n", .{});
+            return error.NoCorpus;
+        };
+        try methods.runProjection(corpus, alloc);
+        return;
+    }
+
+    // `bench width` — campaign axis: classifier chunk width sweep (32/64/128).
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "width")) {
+        const corpus = real orelse {
+            print("width mode needs $ZSIFT_CORPUS set to a CSV file\n", .{});
+            return error.NoCorpus;
+        };
+        try methods.runWidth(corpus, alloc);
+        return;
+    }
+
+    // `bench delivery` — campaign axis: API shape (pull vs batched-pull vs push).
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "delivery")) {
+        const corpus = real orelse {
+            print("delivery mode needs $ZSIFT_CORPUS set to a CSV file\n", .{});
+            return error.NoCorpus;
+        };
+        var d_scratch: [64 * 1024]u8 = undefined;
+        var d_window: [stream_window]u8 = undefined;
+        var d_stream_scratch: [stream_window]u8 = undefined;
+        const dmb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
+        print("delivery over {d:.2} MiB, best of {d} — MB/s\n", .{ dmb, iters });
+        print("{s:>10} {s:>11} {s:>10} {s:>10}\n", .{ "pull", "pull-batch", "push", "stream" });
+        print("{d:>10.0} {d:>11.0} {d:>10.0} {d:>10.0}\n", .{
+            measure(csv.SimdParser, corpus, &d_scratch, iters),
+            measurePullBatch(corpus, &d_scratch, iters),
+            measureCallback(corpus, &d_scratch, iters),
+            measureStream(corpus, &d_window, &d_stream_scratch, iters),
+        });
         return;
     }
 

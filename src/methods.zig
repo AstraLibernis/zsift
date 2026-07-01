@@ -27,6 +27,7 @@ pub const Collapse = enum {
     byteloop, // byte-by-byte with a per-byte branch (the current parser)
     memcpy, // copy clean runs with @memcpy (std.mem.indexOfScalarPos finds runs)
     swarcpy, // copy clean runs with @memcpy, but a SWAR word-scan finds the runs
+    mask, // copy clean runs, but the classifier's quote mask (@ctz) finds the runs
 };
 
 fn nanoTime() u64 {
@@ -122,6 +123,45 @@ fn collapseSwarCpy(in: []const u8, quote: u8, dst: []u8) []const u8 {
     return dst[0..w];
 }
 
+/// Mask-driven collapse for a field wholly inside one chunk: the escaped-quote
+/// positions come from the classifier's quote mask (`@ctz`) instead of re-searching
+/// the bytes. `qbits` is the chunk mask restricted to the inner byte range; `lo` is
+/// the chunk-relative bit of `inner[0]`. Interior quotes are adjacent `""` pairs.
+fn collapseMaskSingleChunk(inner: []const u8, quote: u8, dst: []u8, qbits: u64, lo: u6) usize {
+    var w: usize = 0;
+    var prev: usize = 0;
+    var m = qbits;
+    while (m != 0) {
+        const k = @as(usize, @ctz(m)) - @as(usize, lo); // inner-relative pair start
+        const run = k - prev;
+        @memcpy(dst[w..][0..run], inner[prev..][0..run]);
+        w += run;
+        dst[w] = quote;
+        w += 1;
+        prev = k + 2; // skip the escaped pair
+        m &= m - 1; // clear the pair's first quote bit
+        m &= m - 1; // clear the pair's (adjacent) second quote bit
+    }
+    const run = inner.len - prev;
+    @memcpy(dst[w..][0..run], inner[prev..][0..run]);
+    return w + run;
+}
+
+/// `.mask` dispatch: a field wholly inside one chunk uses the mask; a field that
+/// straddles a chunk boundary falls back to the byte-scan collapse.
+inline fn deliverMask(raw: []const u8, quote: u8, dst: []u8, needs: bool, qmask: u64, field_start: usize, at: usize, base: usize) []const u8 {
+    if (raw.len < 2 or raw[0] != quote) return raw;
+    const inner = raw[1 .. raw.len - 1];
+    if (!needs) return inner;
+    if (field_start >= base) {
+        const lo: u6 = @intCast(field_start + 1 - base);
+        const hi: u6 = @intCast(at - 1 - base);
+        const range = ((@as(u64, 1) << hi) -% 1) & ~((@as(u64, 1) << lo) -% 1);
+        return dst[0..collapseMaskSingleChunk(inner, quote, dst, qmask & range, lo)];
+    }
+    return collapseSwarCpy(inner, quote, dst);
+}
+
 /// Turn a raw field into its delivered value under collapse strategy `c`, given a
 /// precomputed `needs` (does it contain an escaped `""`).
 inline fn deliver(comptime c: Collapse, raw: []const u8, quote: u8, dst: []u8, needs: bool) []const u8 {
@@ -133,6 +173,7 @@ inline fn deliver(comptime c: Collapse, raw: []const u8, quote: u8, dst: []u8, n
         .byteloop => collapseByteLoop(in, quote, dst),
         .memcpy => collapseMemcpy(in, quote, dst),
         .swarcpy => collapseSwarCpy(in, quote, dst),
+        .mask => collapseSwarCpy(in, quote, dst), // fallback for the final tail field
     };
 }
 
@@ -158,7 +199,11 @@ fn parseChecksum(comptime d: Detect, comptime c: Collapse, input: []const u8, sc
             if (at < field_start) continue;
             const raw = input[field_start..at];
             const needs = detect(d, raw, quote, cl.quotes, rel, has_q, &qbc, &fs_q);
-            sum +%= deliver(c, raw, quote, scratch, needs).len;
+            const val = if (c == .mask)
+                deliverMask(raw, quote, scratch, needs, cl.quotes, field_start, at, base)
+            else
+                deliver(c, raw, quote, scratch, needs);
+            sum +%= val.len;
             field_start = recordStep(input, at, delim);
         }
         if (d == .accum and has_q) qbc += @popCount(cl.quotes);
@@ -228,12 +273,194 @@ pub fn runCell(detect_name: []const u8, collapse_name: []const u8, corpus: []con
     const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
     inline for (.{ Detect.none, Detect.rescan, Detect.swar, Detect.accum }) |d| {
         if (std.mem.eql(u8, detect_name, @tagName(d))) {
-            inline for (.{ Collapse.none, Collapse.byteloop, Collapse.memcpy, Collapse.swarcpy }) |c| {
+            inline for (.{ Collapse.none, Collapse.byteloop, Collapse.memcpy, Collapse.swarcpy, Collapse.mask }) |c| {
                 if (std.mem.eql(u8, collapse_name, @tagName(c))) return measure(d, c, corpus, scratch, mb);
             }
         }
     }
     return error.UnknownCell;
+}
+
+// --- Campaign axis: classifier chunk width (32 / 64 / 128-byte vectors) ---
+// A width-generic version of the classifier + the shipped accum/swarcpy parse, so
+// we can measure whether native 32-byte AVX2 beats the 64-byte emulation (or 128).
+
+fn Classifier(comptime W: usize) type {
+    return struct {
+        const Vec = @Vector(W, u8);
+        const Mask = std.meta.Int(.unsigned, W);
+        const SMask = std.meta.Int(.signed, W);
+
+        fn prefixXor(x: Mask) Mask {
+            var r = x;
+            comptime var sh: usize = 1;
+            inline while (sh < W) : (sh *= 2) {
+                r ^= r << @intCast(sh);
+            }
+            return r;
+        }
+
+        fn loadVec(input: []const u8, base: usize) Vec {
+            if (base + W <= input.len) return input[base..][0..W].*;
+            var buf: [W]u8 = @splat(0);
+            @memcpy(buf[0 .. input.len - base], input[base..]);
+            return buf;
+        }
+
+        const Res = struct { seps: Mask, quotes: Mask };
+        fn classify(input: []const u8, base: usize, opts: csv.Options, carry: *Mask) Res {
+            const v = loadVec(input, base);
+            const quote_bits: Mask = @bitCast(v == @as(Vec, @splat(opts.quote)));
+            const inside = prefixXor(quote_bits) ^ carry.*;
+            carry.* = @bitCast(@as(SMask, @bitCast(inside)) >> (W - 1));
+            const delim_bits: Mask = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
+            const lf: Mask = @bitCast(v == @as(Vec, @splat('\n')));
+            const cr: Mask = @bitCast(v == @as(Vec, @splat('\r')));
+            return .{ .seps = (delim_bits | lf | cr) & ~inside, .quotes = quote_bits };
+        }
+    };
+}
+
+fn parseW(comptime W: usize, input: []const u8, scratch: []u8, opts: csv.Options) u64 {
+    const C = Classifier(W);
+    const quote = opts.quote;
+    const delim = opts.delimiter;
+    var sum: u64 = 0;
+    var field_start: usize = 0;
+    var carry: C.Mask = 0;
+    var base: usize = 0;
+    var qbc: u64 = 0;
+    var fs_q: u64 = 0;
+    while (base < input.len) : (base += W) {
+        const cl = C.classify(input, base, opts, &carry);
+        var s = cl.seps;
+        const has_q = cl.quotes != 0;
+        while (s != 0) {
+            const rel: usize = @ctz(s);
+            s &= s - 1;
+            const at = base + rel;
+            if (at < field_start) continue;
+            const raw = input[field_start..at];
+            var needs = false;
+            if (input[field_start] == quote) {
+                const below: C.Mask = (@as(C.Mask, 1) << @intCast(rel)) -% 1;
+                const q_up_to = if (has_q) qbc + @popCount(cl.quotes & below) else qbc;
+                needs = (q_up_to - fs_q) > 2;
+                fs_q = q_up_to;
+            }
+            sum +%= deliver(.swarcpy, raw, quote, scratch, needs).len;
+            field_start = recordStep(input, at, delim);
+        }
+        if (has_q) qbc += @popCount(cl.quotes);
+    }
+    if (field_start < input.len) {
+        const raw = input[field_start..];
+        const needs = input[field_start] == quote and (qbc - fs_q) > 2;
+        sum +%= deliver(.swarcpy, raw, quote, scratch, needs).len;
+    }
+    return sum;
+}
+
+fn measureW(comptime W: usize, corpus: []const u8, scratch: []u8, mb: f64) f64 {
+    std.mem.doNotOptimizeAway(parseW(W, corpus, scratch, .{}));
+    var best: u64 = std.math.maxInt(u64);
+    var i: usize = 0;
+    while (i < reps) : (i += 1) {
+        const t0 = nanoTime();
+        const s = parseW(W, corpus, scratch, .{});
+        const dt = nanoTime() - t0;
+        std.mem.doNotOptimizeAway(s);
+        if (dt < best) best = dt;
+    }
+    return mb / (@as(f64, @floatFromInt(best)) / 1e9);
+}
+
+/// Sweep classifier chunk width (accum+swarcpy fixed). Checksum must match scalar.
+pub fn runWidth(corpus: []const u8, alloc: std.mem.Allocator) !void {
+    const print = std.debug.print;
+    const scratch = try alloc.alloc(u8, corpus.len + 64);
+    defer alloc.free(scratch);
+    const ref = scalarChecksum(corpus, scratch);
+    const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
+    print("\nCHUNK WIDTH sweep (accum+swarcpy), {d:.2} MiB, best of {d}\n", .{ mb, reps });
+    print("{s:>8} {s:>10} {s:>8}\n", .{ "width", "MB/s", "correct" });
+    inline for (.{ 32, 64, 128 }) |w| {
+        const sum = parseW(w, corpus, scratch, .{});
+        const mbps = measureW(w, corpus, scratch, mb);
+        print("{d:>8} {d:>10.0} {s:>8}\n", .{ w, mbps, if (sum == ref) "MATCH" else "MISMATCH" });
+    }
+}
+
+// --- Campaign axis: eager vs lazy materialization under a projection workload ---
+// Fixes detection=accum, collapse=swarcpy (the shipped pair) and only varies whether
+// the collapse is done for every field (eager) or only for the fields a projecting
+// consumer actually reads (lazy). Detection still runs for all fields — it maintains
+// the running counts and is cheap; only the expensive collapse is deferred.
+
+fn parseProject(comptime lazy: bool, comptime stride: usize, input: []const u8, scratch: []u8, opts: csv.Options) u64 {
+    const quote = opts.quote;
+    const delim = opts.delimiter;
+    var sum: u64 = 0;
+    var field_start: usize = 0;
+    var carry: u64 = 0;
+    var base: usize = 0;
+    var qbc: u64 = 0;
+    var fs_q: u64 = 0;
+    var fi: usize = 0; // field index across the whole input
+    while (base < input.len) : (base += classify.chunk_len) {
+        const cl = classify.classifyAtFull(input, base, opts, &carry);
+        var s = cl.seps;
+        const has_q = cl.quotes != 0;
+        while (s != 0) {
+            const rel: usize = @ctz(s);
+            s &= s - 1;
+            const at = base + rel;
+            if (at < field_start) continue;
+            const raw = input[field_start..at];
+            const needs = detect(.accum, raw, quote, cl.quotes, rel, has_q, &qbc, &fs_q);
+            const projected = (fi % stride) == 0;
+            if (lazy) {
+                if (projected) sum +%= deliver(.swarcpy, raw, quote, scratch, needs).len;
+                // non-projected fields skip the collapse entirely
+            } else {
+                const v = deliver(.swarcpy, raw, quote, scratch, needs); // collapse every field
+                if (projected) sum +%= v.len;
+            }
+            fi += 1;
+            field_start = recordStep(input, at, delim);
+        }
+        if (has_q) qbc += @popCount(cl.quotes);
+    }
+    return sum;
+}
+
+fn measureProject(comptime lazy: bool, comptime stride: usize, corpus: []const u8, scratch: []u8, mb: f64) f64 {
+    std.mem.doNotOptimizeAway(parseProject(lazy, stride, corpus, scratch, .{}));
+    var best: u64 = std.math.maxInt(u64);
+    var i: usize = 0;
+    while (i < reps) : (i += 1) {
+        const t0 = nanoTime();
+        const s = parseProject(lazy, stride, corpus, scratch, .{});
+        const dt = nanoTime() - t0;
+        std.mem.doNotOptimizeAway(s);
+        if (dt < best) best = dt;
+    }
+    return mb / (@as(f64, @floatFromInt(best)) / 1e9);
+}
+
+/// Eager vs lazy collapse across projection strides (read 1 of every N fields).
+pub fn runProjection(corpus: []const u8, alloc: std.mem.Allocator) !void {
+    const print = std.debug.print;
+    const scratch = try alloc.alloc(u8, corpus.len + 64);
+    defer alloc.free(scratch);
+    const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
+    print("\nEAGER vs LAZY collapse (accum+swarcpy), {d:.2} MiB, best of {d}, MB/s\n", .{ mb, reps });
+    print("{s:<14} {s:>10} {s:>10} {s:>8}\n", .{ "read 1 of", "eager", "lazy", "lazy/eager" });
+    inline for (.{ 1, 2, 4, 12 }) |stride| {
+        const e = measureProject(false, stride, corpus, scratch, mb);
+        const l = measureProject(true, stride, corpus, scratch, mb);
+        print("{d:<14} {d:>10.0} {d:>10.0} {d:>7.2}x\n", .{ stride, e, l, l / e });
+    }
 }
 
 /// Run the full DETECT × COLLAPSE grid over `corpus` and print MB/s + correctness.
@@ -258,10 +485,10 @@ pub fn runMatrix(corpus: []const u8, alloc: std.mem.Allocator) !void {
     const ceil = mb / (@as(f64, @floatFromInt(cbest)) / 1e9);
 
     print("\nDETECT × COLLAPSE — {d:.2} MiB, best of {d}, MB/s ('*' = output differs from scalar)\n", .{ mb, reps });
-    print("{s:<8} {s:>13} {s:>13} {s:>13} {s:>13}\n", .{ "det\\coll", "none", "byteloop", "memcpy", "swarcpy" });
+    print("{s:<8} {s:>13} {s:>13} {s:>13} {s:>13} {s:>13}\n", .{ "det\\coll", "none", "byteloop", "memcpy", "swarcpy", "mask" });
     inline for (.{ Detect.none, Detect.rescan, Detect.swar, Detect.accum }) |d| {
         print("{s:<8}", .{@tagName(d)});
-        inline for (.{ Collapse.none, Collapse.byteloop, Collapse.memcpy, Collapse.swarcpy }) |c| {
+        inline for (.{ Collapse.none, Collapse.byteloop, Collapse.memcpy, Collapse.swarcpy, Collapse.mask }) |c| {
             const sum = parseChecksum(d, c, corpus, scratch, .{});
             const mbps = measure(d, c, corpus, scratch, mb);
             print(" {d:>11.0}{s} ", .{ mbps, if (sum == ref) " " else "*" });
