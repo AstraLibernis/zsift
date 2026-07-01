@@ -1,2 +1,6 @@
 .zig-cache/
 zig-out/
+
+# benchfence run artifacts (machine-local)
+bench-results.json
+out/

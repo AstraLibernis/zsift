@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const csv = @import("csv");
+const methods = @import("methods.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -251,26 +252,85 @@ fn measureOne(alloc: std.mem.Allocator, prof: Profile, sel: PathSel) !f64 {
     };
 }
 
+/// Measure a single path over an explicit corpus (used for a real $ZSIFT_CORPUS
+/// file, where the profile dimension is irrelevant — the file is what it is).
+fn measurePath(corpus: []const u8, sel: PathSel, scratch: []u8, window: []u8, stream_scratch: []u8) f64 {
+    return switch (sel) {
+        .scalar => measure(csv.Parser, corpus, scratch, iters),
+        .pull => measure(csv.SimdParser, corpus, scratch, iters),
+        .push => measureCallback(corpus, scratch, iters),
+        .stream => measureStream(corpus, window, stream_scratch, iters),
+        .ceil => measureScan(corpus, iters),
+    };
+}
+
+/// Load the real CSV corpus named by $ZSIFT_CORPUS, or null when unset. When
+/// present it replaces the synthetic profiles so the benchmark reflects
+/// real-world data (true field-length distribution, real quoting/escaping)
+/// instead of the generator's short uniform fields.
+fn envCorpus(init: std.process.Init, alloc: std.mem.Allocator) !?[]u8 {
+    const path = init.environ_map.get("ZSIFT_CORPUS") orelse return null;
+    return try std.Io.Dir.cwd().readFileAlloc(init.io, path, alloc, .unlimited);
+}
+
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.page_allocator;
+    const print = std.debug.print;
+
+    // A real corpus named by $ZSIFT_CORPUS overrides the synthetic profiles (the
+    // profile argument is then ignored), so the benchmark can report numbers on
+    // real-world CSV rather than the generator's short-field synthetic data.
+    const real = try envCorpus(init, alloc);
+    defer if (real) |c| alloc.free(c);
+
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+
+    // `bench matrix` (with $ZSIFT_CORPUS) runs the DETECT × COLLAPSE experiment
+    // grid over the whole corpus instead of the normal report.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "matrix")) {
+        const corpus = real orelse {
+            print("matrix mode needs $ZSIFT_CORPUS set to a CSV file\n", .{});
+            return error.NoCorpus;
+        };
+        try methods.runMatrix(corpus, alloc);
+        return;
+    }
+
+    // `bench cell <detect> <collapse>` — single-shot ONE matrix cell over
+    // $ZSIFT_CORPUS, printing BENCHFENCE_METRIC for a benchfence driver to gate.
+    if (argv.len >= 4 and std.mem.eql(u8, argv[1], "cell")) {
+        const corpus = real orelse {
+            print("cell mode needs $ZSIFT_CORPUS set to a CSV file\n", .{});
+            return error.NoCorpus;
+        };
+        const mbps = try methods.runCell(argv[2], argv[3], corpus, alloc);
+        print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
+        return;
+    }
 
     // Single-shot mode for a benchfence driver: `bench <profile> <path>` runs ONE
     // (profile, path) measurement and prints a machine-readable metric, so the
     // driver controls iteration and gates each measurement (README "level 2").
     // No args → the human table below (best-of-iters per cell, all paths).
-    const argv = try init.minimal.args.toSlice(init.arena.allocator());
     if (argv.len >= 3) {
-        const prof = parseProfile(argv[1]) orelse {
-            std.debug.print("unknown profile '{s}' (clean|quoted|escapey)\n", .{argv[1]});
-            return error.BadProfile;
-        };
         const sel = parsePath(argv[2]) orelse {
-            std.debug.print("unknown path '{s}' (scalar|pull|push|stream|ceil)\n", .{argv[2]});
+            print("unknown path '{s}' (scalar|pull|push|stream|ceil)\n", .{argv[2]});
             return error.BadPath;
         };
-        const mbps = try measureOne(alloc, prof, sel);
+        var ss_scratch: [64 * 1024]u8 = undefined;
+        var ss_window: [stream_window]u8 = undefined;
+        var ss_stream_scratch: [stream_window]u8 = undefined;
+        const mbps = if (real) |corpus|
+            measurePath(corpus, sel, &ss_scratch, &ss_window, &ss_stream_scratch)
+        else blk: {
+            const prof = parseProfile(argv[1]) orelse {
+                print("unknown profile '{s}' (clean|quoted|escapey)\n", .{argv[1]});
+                return error.BadProfile;
+            };
+            break :blk try measureOne(alloc, prof, sel);
+        };
         // benchfence/driver reads this exact key (lib/driver.nu metric_of).
-        std.debug.print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
+        print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
         return;
     }
 
@@ -278,7 +338,29 @@ pub fn main(init: std.process.Init) !void {
     var window: [stream_window]u8 = undefined;
     var stream_scratch: [stream_window]u8 = undefined;
 
-    const print = std.debug.print;
+    // Real corpus: one measured row across all paths, plus a scalar-vs-SIMD
+    // field checksum cross-check that catches the two parsers disagreeing on the
+    // real data (embedded newlines, escaped quotes, cross-chunk quoted fields).
+    if (real) |corpus| {
+        const warm = parseOnce(csv.Parser, corpus, &scratch);
+        const warm_simd = parseOnce(csv.SimdParser, corpus, &scratch);
+        const match = warm.checksum == warm_simd.checksum;
+        print("zsift benchmark — real corpus $ZSIFT_CORPUS: {d:.2} MiB, {d} records, best of {d}\n", .{ @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0), warm.rows, iters });
+        print("scalar/simd field checksum: {s}\n", .{if (match) "MATCH" else "MISMATCH — parsers disagree!"});
+        print("{s:<9} {s:>10} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{ "corpus", "rows", "scalar", "simd pull", "simd push", "stream", "scan ceil" });
+        print("{s:<9} {s:>10} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{ "", "", "MB/s", "MB/s", "MB/s", "MB/s", "MB/s" });
+        print("{s:<9} {d:>10} {d:>9.1} {d:>10.1} {d:>10.1} {d:>10.1} {d:>10.1}\n", .{
+            "real",
+            warm.rows,
+            measure(csv.Parser, corpus, &scratch, iters),
+            measure(csv.SimdParser, corpus, &scratch, iters),
+            measureCallback(corpus, &scratch, iters),
+            measureStream(corpus, &window, &stream_scratch, iters),
+            measureScan(corpus, iters),
+        });
+        return;
+    }
+
     print("zsift benchmark — corpus ~{d} MiB/profile, {d} cols, best of {d} ({d} KiB stream window)\n", .{ target_bytes >> 20, cols, iters, stream_window >> 10 });
     print("{s:<9} {s:>10} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{ "profile", "rows", "scalar", "simd pull", "simd push", "stream", "scan ceil" });
     print("{s:<9} {s:>10} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10}\n", .{ "", "", "MB/s", "MB/s", "MB/s", "MB/s", "MB/s" });

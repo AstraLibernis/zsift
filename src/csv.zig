@@ -23,6 +23,10 @@ pub const Parser = @import("scalar.zig").Parser;
 pub const simd = @import("simd.zig");
 pub const SimdParser = simd.SimdParser;
 
+/// SIMD chunk-classification primitives (the vector layer). Exposed so the
+/// benchmark's method-matrix experiment can build alternative parse strategies.
+pub const classify = @import("classify.zig");
+
 /// Streaming over a `std.Io.Reader` plus the auto-selecting facade. See `stream.zig`.
 pub const stream = @import("stream.zig");
 pub const streamReader = stream.streamReader;
