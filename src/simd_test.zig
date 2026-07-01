@@ -254,5 +254,21 @@ test "simd: differential fuzz — push and pull match generated fields" {
             try testing.expectEqual(lasts.items[idx], field.last_in_record);
         }
         try testing.expectEqual(expected.items.len, idx);
+
+        // Batched-pull path (nextInto) — a small batch size to exercise refills.
+        var pb = SimdParser.init(csv.items, scratch, .{});
+        var fbuf: [5]simd.Field = undefined;
+        var bidx: usize = 0;
+        while (true) {
+            const got = try pb.nextInto(&fbuf);
+            if (got == 0) break;
+            for (fbuf[0..got]) |f| {
+                try testing.expect(bidx < expected.items.len);
+                try testing.expectEqualStrings(expected.items[bidx], f.bytes);
+                try testing.expectEqual(lasts.items[bidx], f.last_in_record);
+                bidx += 1;
+            }
+        }
+        try testing.expectEqual(expected.items.len, bidx);
     }
 }

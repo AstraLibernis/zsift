@@ -309,4 +309,88 @@ pub const SimdParser = struct {
         }
         return dst[0..n];
     }
+
+    /// Batched pull: fill `dst` with up to `dst.len` fields and return the count
+    /// (0 at end of input). Same semantics as calling `next()` repeatedly, but the
+    /// hot scan state lives in locals for the whole batch and is written back to the
+    /// struct only once — amortizing the per-field state round-trip `next()` pays.
+    /// Scratch is cumulative across the batch (as with a record); call `resetScratch`
+    /// between batches, or size scratch to hold a batch's unescaped bytes.
+    pub fn nextInto(self: *SimdParser, dst: []Field) Error!usize {
+        const quote = self.opts.quote;
+        const delim = self.opts.delimiter;
+        var structural = self.structural;
+        var quotes = self.quotes;
+        var quotes_before = self.quotes_before;
+        var field_quotes = self.field_quotes;
+        var carry = self.carry;
+        var field_start = self.field_start;
+        var scan_base = self.scan_base;
+        var next_base = self.next_base;
+        var scratch_used = self.scratch_used;
+        var finished = self.finished;
+        var pending = self.pending;
+        var n: usize = 0;
+        while (n < dst.len) {
+            if (structural != 0) {
+                const rel: usize = @ctz(structural);
+                structural &= structural - 1;
+                const at = scan_base + rel;
+                if (at < field_start) continue; // trailing '\n' of a CRLF
+                var needs = false;
+                if (self.input[field_start] == quote) {
+                    const q_up_to = if (quotes != 0) quotes_before + quotesBelow(quotes, rel) else quotes_before;
+                    needs = (q_up_to - field_quotes) > 2;
+                    field_quotes = q_up_to;
+                }
+                const r = try unescapeInto(self.input[field_start..at], quote, self.scratch[scratch_used..], needs);
+                scratch_used += r.written;
+                const step = recordStep(self.input, at, delim);
+                field_start = step.next_start;
+                pending = !step.last;
+                dst[n] = .{ .bytes = r.value, .last_in_record = step.last };
+                n += 1;
+                continue;
+            }
+            if (next_base >= self.input.len) {
+                if (finished) break;
+                if (field_start < self.input.len) {
+                    finished = true;
+                    const needs = self.input[field_start] == quote and
+                        (quotes_before + @popCount(quotes) - field_quotes) > 2;
+                    const r = try unescapeInto(self.input[field_start..self.input.len], quote, self.scratch[scratch_used..], needs);
+                    scratch_used += r.written;
+                    dst[n] = .{ .bytes = r.value, .last_in_record = true };
+                    n += 1;
+                    continue;
+                }
+                finished = true;
+                if (pending) {
+                    pending = false;
+                    dst[n] = .{ .bytes = self.input[self.input.len..], .last_in_record = true };
+                    n += 1;
+                }
+                break;
+            }
+            // loadChunk, inline (keeps state in locals)
+            quotes_before += @popCount(quotes);
+            const cl = classifyAtFull(self.input, next_base, self.opts, &carry);
+            structural = cl.seps;
+            quotes = cl.quotes;
+            scan_base = next_base;
+            next_base += chunk_len;
+        }
+        self.structural = structural;
+        self.quotes = quotes;
+        self.quotes_before = quotes_before;
+        self.field_quotes = field_quotes;
+        self.carry = carry;
+        self.field_start = field_start;
+        self.scan_base = scan_base;
+        self.next_base = next_base;
+        self.scratch_used = scratch_used;
+        self.finished = finished;
+        self.pending = pending;
+        return n;
+    }
 };
