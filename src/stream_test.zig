@@ -117,6 +117,31 @@ test "stream: fixed reader matches in-memory" {
     try testing.expectEqualStrings(want.slice(), got.slice());
 }
 
+test "stream: CR at exact window edge (CRLF and lone CR) matches in-memory" {
+    // Regression: a record + trailing `\r` that exactly fills the window used to
+    // trip a spurious RecordTooLong, because `completeRecordsLen` defers a `\r` at
+    // the window end. Both a split CRLF and a lone CR (Mac) must parse correctly.
+    // The record (15 bytes) plus its trailing `\r` exactly fill the 16-byte
+    // window; the `\r` is inside the window, so it is a valid complete record
+    // (unlike a 16-byte record whose terminator would fall outside — that is the
+    // documented RecordTooLong case and is intentionally excluded here).
+    const cases = [_][]const u8{
+        "aaaaaaaaaaaaaaa\r\nbbb\n", // 15 chars + CR fills the window; LF is next
+        "aaaaaaaaaaaaaaa\rbbb", // lone CR at the window edge, more data after
+        "aaaaaaaaaaaaaaa\r\nbbb", // split CRLF, no trailing newline
+        "aaaaaaaaaaaaaaa\r", // CR at window edge is the last byte of input
+    };
+    for (cases) |data| {
+        const want = try canonInMemory(data);
+        var window: [16]u8 = undefined;
+        var cr = ChunkedReader.init(&window, data, 4);
+        var got = Collector{};
+        var scratch: [4096]u8 = undefined;
+        try csv.streamReader(&cr.interface, &scratch, .{}, &got, Collector.on);
+        try testing.expectEqualStrings(want.slice(), got.slice());
+    }
+}
+
 test "stream: chunked reader (real refills) matches in-memory" {
     const want = try canonInMemory(sample);
     // Window larger than the longest record, but data delivered 3 bytes at a

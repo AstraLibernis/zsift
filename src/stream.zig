@@ -38,7 +38,7 @@ pub const StreamError = Error || error{
 /// the index one past the last record terminator lying outside a quoted region.
 /// Returns 0 when the window holds no complete record.
 ///
-/// Vectorized: `simd.terminatorsAt` gives, per 64-byte chunk, the `\n`/`\r` bits
+/// Vectorized: `classify.terminatorsAt` gives, per 64-byte chunk, the `\n`/`\r` bits
 /// that lie outside quoted regions (escaped `""` self-cancels in the quote mask).
 /// We take the highest such bit per chunk — later chunks hold later boundaries —
 /// resolving `\r\n` and deferring only a lone `\r` at the very end of the window
@@ -81,20 +81,49 @@ pub fn streamReader(
     ctx: anytype,
     comptime onField: fn (@TypeOf(ctx), bytes: []const u8, last_in_record: bool) void,
 ) StreamError!void {
+    // Set after a record was terminated by a `\r` sitting at the exact window end:
+    // if the next window opens with `\n`, that byte is the CRLF's second half and
+    // must be swallowed rather than read as an empty leading record.
+    var swallow_lf = false;
     while (true) {
-        const window = r.buffered();
+        var window = r.buffered();
+        if (swallow_lf) {
+            if (window.len == 0) {
+                // Need one byte to decide; EndOfStream means the `\r` was the last
+                // byte of input — the record is already emitted, so we are done.
+                r.fillMore() catch |err| switch (err) {
+                    error.EndOfStream => return,
+                    error.ReadFailed => return StreamError.ReadFailed,
+                };
+                window = r.buffered();
+            }
+            if (window[0] == '\n') r.toss(1); // CRLF second half; a lone `\r` had none
+            swallow_lf = false;
+            continue;
+        }
         const boundary = completeRecordsLen(window, opts);
         if (boundary > 0) {
             try simd.forEachField(window[0..boundary], scratch, opts, ctx, onField);
             r.toss(boundary);
             continue;
         }
-        // No complete record buffered. If the buffer is full we cannot fillMore
-        // (the reader's rebase would assert), so probe one byte beyond it — read
-        // into our own tiny buffer, which leaves the window untouched — to tell a
-        // genuinely over-long record (more bytes follow) from a complete final
-        // record that merely fills the window exactly (EOF here).
+        // No complete record buffered.
         if (r.bufferedLen() == r.buffer.len) {
+            // A full window whose only would-be terminator is a `\r` at the very
+            // end read as "no complete record" solely because `completeRecordsLen`
+            // defers a trailing `\r` (it might begin a CRLF). But the `\r` *does*
+            // terminate the record — parse the window, then swallow a following
+            // `\n` next round. This is a complete record, not an over-long one.
+            if (window.len > 0 and window[window.len - 1] == '\r') {
+                try simd.forEachField(window, scratch, opts, ctx, onField);
+                r.toss(window.len);
+                swallow_lf = true;
+                continue;
+            }
+            // Otherwise the buffer is genuinely full with no terminator. Probe one
+            // byte beyond it (into our own buffer, leaving the window untouched) to
+            // tell a truly over-long record from a final record that fills the
+            // window exactly (EOF here).
             var probe: [1]u8 = undefined;
             var bufs: [1][]u8 = .{&probe};
             const got = r.vtable.readVec(r, &bufs) catch |err| switch (err) {
