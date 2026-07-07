@@ -1,3 +1,5 @@
 corpus/
 rcorpus/
 rustcsv/target/
+zsv/
+zsvbench

@@ -189,8 +189,9 @@ delivery shape — was chosen by a reproducible bake-off, not by guessing: `zig 
 experiment` runs the whole grid on generated light/heavy corpora, and
 [EXPERIMENTS.md](EXPERIMENTS.md) records the method and what won.
 
-For a cross-library comparison against Rust's `BurntSushi/rust-csv` (same bytes,
-matched task, fenced, four passes), see [bench/vs-rust-csv/](bench/vs-rust-csv/).
+For cross-library comparisons — against Rust's common `BurntSushi/rust-csv` and the
+specialist SIMD-C `liquidaty/zsv` (same bytes, matched task, fenced) — see
+[bench/vs-csv-parsers/](bench/vs-csv-parsers/).
 
 ## Trustworthy benchmarking
 
@@ -236,17 +237,20 @@ possible follow-up.
   compares, then a branchless prefix-XOR carry masks separators inside quotes —
   the same approach zsift re-derived here.
 
-> **Raced against rust-csv (2026-07-07).** zsift has now been benchmarked
-> head-to-head against Rust's `BurntSushi/rust-csv` — same corpus bytes, a matched
-> parse-and-sum-every-field task, cross-validated record/field counts, fenced. On a
-> Hyper-V VM (i7-1365U, AVX2), across clean/quoted/escapey and four randomized CSV
-> shapes, zsift's zero-copy `push` path ran **3.0–5.2×** rust's `csv::Reader` (up to
-> 7.3× on trivially clean data) and the API-matched `pull` path **2.1–3.3×**,
-> reproducible to ~1% CV over four fenced passes; rust-csv landed near zsift's own
-> *scalar* path, so the gap is essentially the SIMD scan. Absolute MB/s are
-> VM-specific — treat the ratios as the finding. Full method, tables, tool versions,
-> and the re-runnable harness: [bench/vs-rust-csv/](bench/vs-rust-csv/). The other
-> libraries above remain surveyed, not raced.
+> **Raced (2026-07-07).** zsift has now been benchmarked head-to-head against two of
+> the above — same corpus bytes, a matched parse-and-sum-every-field task,
+> cross-validated counts, fenced. On a Hyper-V VM (i7-1365U, AVX2), across
+> clean/quoted/escapey and four randomized shapes:
+> - vs **`BurntSushi/rust-csv`** (the common, full-featured library): zsift `push`
+>   **3.0–5.2×**, `pull` **2.1–3.3×** — reproducible to ~1% CV over four fenced passes.
+> - vs **`liquidaty/zsv`** (the specialist SIMD-C "fastest CSV parser" — the true peer):
+>   zsift `push` **2.1–2.85×**, `pull` **1.0–1.6×**. zsv itself beat rust-csv 1.1–2.6×,
+>   which is why zsv, not rust-csv, is the honest speed yardstick.
+>
+> Absolute MB/s are VM-specific — treat the ratios as the finding. Full method, tables,
+> tool versions, and the re-runnable harness (both peers):
+> [bench/vs-csv-parsers/](bench/vs-csv-parsers/). The remaining libraries above are
+> surveyed, not raced.
 
 ## Roadmap
 
