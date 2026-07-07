@@ -189,6 +189,9 @@ delivery shape — was chosen by a reproducible bake-off, not by guessing: `zig 
 experiment` runs the whole grid on generated light/heavy corpora, and
 [EXPERIMENTS.md](EXPERIMENTS.md) records the method and what won.
 
+For a cross-library comparison against Rust's `BurntSushi/rust-csv` (same bytes,
+matched task, fenced, four passes), see [bench/vs-rust-csv/](bench/vs-rust-csv/).
+
 ## Trustworthy benchmarking
 
 This is a shared Hyper-V VM; the host steals CPU unpredictably, so `zig build
@@ -233,11 +236,17 @@ possible follow-up.
   compares, then a branchless prefix-XOR carry masks separators inside quotes —
   the same approach zsift re-derived here.
 
-> **These are surveyed, not raced.** zsift has *not* been benchmarked head-to-head
-> against any of the above — in particular Rust's mature `BurntSushi/rust-csv`. The
-> numbers in this README compare zsift only against its own scalar path on one
-> machine; treat "fast" as "fast relative to a naive loop here," not as a measured
-> win over another library.
+> **Raced against rust-csv (2026-07-07).** zsift has now been benchmarked
+> head-to-head against Rust's `BurntSushi/rust-csv` — same corpus bytes, a matched
+> parse-and-sum-every-field task, cross-validated record/field counts, fenced. On a
+> Hyper-V VM (i7-1365U, AVX2), across clean/quoted/escapey and four randomized CSV
+> shapes, zsift's zero-copy `push` path ran **3.0–5.2×** rust's `csv::Reader` (up to
+> 7.3× on trivially clean data) and the API-matched `pull` path **2.1–3.3×**,
+> reproducible to ~1% CV over four fenced passes; rust-csv landed near zsift's own
+> *scalar* path, so the gap is essentially the SIMD scan. Absolute MB/s are
+> VM-specific — treat the ratios as the finding. Full method, tables, tool versions,
+> and the re-runnable harness: [bench/vs-rust-csv/](bench/vs-rust-csv/). The other
+> libraries above remain surveyed, not raced.
 
 ## Roadmap
 

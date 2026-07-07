@@ -1,0 +1,38 @@
+[
+ {
+  "name": "rand0",
+  "cols": 6,
+  "style": "mixed",
+  "quote_pct": 7,
+  "escape_pct": 27,
+  "comma_pct": 38,
+  "MiB": 16.0
+ },
+ {
+  "name": "rand1",
+  "cols": 10,
+  "style": "numeric",
+  "quote_pct": 45,
+  "escape_pct": 12,
+  "comma_pct": 37,
+  "MiB": 16.0
+ },
+ {
+  "name": "rand2",
+  "cols": 12,
+  "style": "numeric",
+  "quote_pct": 59,
+  "escape_pct": 8,
+  "comma_pct": 16,
+  "MiB": 16.0
+ },
+ {
+  "name": "rand3",
+  "cols": 7,
+  "style": "mixed",
+  "quote_pct": 37,
+  "escape_pct": 19,
+  "comma_pct": 37,
+  "MiB": 16.0
+ }
+]
