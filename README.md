@@ -7,6 +7,30 @@ choice is measured, not guessed. zsift offers a lenient scalar parser, a vectori
 (SIMD) fast path, a streaming reader with bounded memory, and an auto-selecting
 facade that picks slurp-vs-stream by size.
 
+## What it is — a speedster, not an all-purpose library
+
+zsift does **one job, fast**: turn delimited bytes into fields. That narrow focus
+*is* the value — on this VM it measured ~2–2.85× a purpose-built SIMD C parser
+(`zsv`) and ~3–5× the common full-featured library (`rust-csv`) on a parse-every-field
+task (see [bench/vs-csv-parsers/](bench/vs-csv-parsers/); numbers are VM-specific,
+ratios are the point).
+
+It is deliberately **not** a full-featured CSV library. It does not:
+
+- deserialize rows into typed structs (no serde-style mapping);
+- **write** CSV — it is read-only;
+- support rich dialects beyond a configurable delimiter + quote (no comment chars,
+  trimming, per-column rules);
+- validate UTF-8 or detect encodings;
+- hand you an owned, durable record — a `Field` is a byte-slice that *borrows* the
+  input (zero-copy), valid only as long as the input (or scratch) lives.
+
+The missing features and the speed are the **same decision**: zsift hands back
+borrowed bytes and gets out of the way, so owning, typing, and validating them is
+the caller's job. If you need those conveniences more than raw throughput, reach for
+a full parser like [`rust-csv`](https://github.com/BurntSushi/rust-csv) — zsift is
+the racecar you bolt onto a pipeline that already knows what it wants from each field.
+
 ## Design
 
 Three decisions define a CSV parser; we picked the column that is idiomatic Zig
