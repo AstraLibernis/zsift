@@ -233,6 +233,12 @@ possible follow-up.
   compares, then a branchless prefix-XOR carry masks separators inside quotes —
   the same approach zsift re-derived here.
 
+> **These are surveyed, not raced.** zsift has *not* been benchmarked head-to-head
+> against any of the above — in particular Rust's mature `BurntSushi/rust-csv`. The
+> numbers in this README compare zsift only against its own scalar path on one
+> machine; treat "fast" as "fast relative to a naive loop here," not as a measured
+> win over another library.
+
 ## Roadmap
 
 - [x] SIMD structural-scan fast path (`@Vector`, portable prefix-XOR)
