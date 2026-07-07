@@ -276,7 +276,10 @@ possible follow-up.
 > [bench/vs-csv-parsers/](bench/vs-csv-parsers/). The remaining libraries above are
 > surveyed, not raced.
 
-## Roadmap
+## Status — settled
+
+Stable and feature-complete for its scope (Zig 0.16). Everything the design set out
+to do is built and measured:
 
 - [x] SIMD structural-scan fast path (`@Vector`, portable prefix-XOR)
 - [x] Inlined push/callback API to cut per-field dispatch overhead
@@ -290,8 +293,12 @@ possible follow-up.
 - [x] Mask-based escape detection + run-based (`@memcpy` / SWAR) `""` collapse —
       escape-heavy CSV is no longer materialization-bound
 - [x] Batched pull (`nextInto`) to amortize the per-call iterator cost
-- [x] Reproducible method-selection experiment (`zig build experiment`) + write-up
-- [ ] Reduce field-delivery overhead — the remaining gap to the scan ceiling is
-      slicing and handing back each field, not scanning
-- [ ] Multi-core parsing (split at safe record boundaries) — single-threaded today
-- [ ] Options: lazy quotes, skip-blank-lines, comment lines, trimming
+- [x] Reproducible method-selection experiment (`zig build experiment`) + write-up;
+      benchmarked head-to-head against rust-csv and zsv (`bench/vs-csv-parsers/`)
+
+**Scope is intentionally closed** (see [What it is](#what-it-is--a-speedster-not-an-all-purpose-library)):
+dialect and convenience features — comment lines, trimming, per-column rules, typed
+deserialization, writing — are *out of scope*, not backlog. The only conceivable
+further work is speed, not surface — trimming field-delivery overhead (the remaining
+gap to the scan ceiling) and multi-core parsing at safe record boundaries — and
+neither is planned. zsift is done until a real workload asks for one.
