@@ -236,7 +236,7 @@ inline fn detect(comptime d: Detect, raw: []const u8, quote: u8, q: u64, rel: us
 }
 
 fn scalarChecksum(corpus: []const u8, scratch: []u8) u64 {
-    var p = csv.Parser.init(corpus, scratch, .{});
+    var p = csv.Parser.init(corpus, scratch, .{}) catch |e| std.debug.panic("bench: {s}", .{@errorName(e)});
     var sum: u64 = 0;
     while (p.next() catch null) |first| {
         p.resetScratch();

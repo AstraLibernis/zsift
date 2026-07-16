@@ -17,6 +17,7 @@
 //!     elsewhere in an unquoted field is literal (`3" pipe` → `3" pipe`).
 //!   * `\n`, `\r\n`, and a lone `\r` all terminate a record.
 
+const builtin = @import("builtin");
 const types = @import("types.zig");
 
 const Options = types.Options;
@@ -36,7 +37,8 @@ pub const Parser = struct {
 
     /// `scratch` is only ever written when a quoted field contains an escaped
     /// quote (`""`). If your data has none, an empty scratch (`&.{}`) is fine.
-    pub fn init(input: []const u8, scratch: []u8, opts: Options) Parser {
+    pub fn init(input: []const u8, scratch: []u8, opts: Options) Error!Parser {
+        try opts.validate();
         return .{
             .input = input,
             .pos = 0,
@@ -51,6 +53,10 @@ pub const Parser = struct {
     /// that pointed into scratch (an unescaped field); fields that point into
     /// the input are unaffected.
     pub fn resetScratch(self: *Parser) void {
+        // Debug-only: poison the region being reclaimed so any `Field.bytes` still
+        // pointing into scratch (a retained unescaped field) reads obvious garbage
+        // in tests instead of silently-valid stale bytes. Zero cost in release.
+        if (builtin.mode == .Debug) @memset(self.scratch[0..self.scratch_used], 0xAA);
         self.scratch_used = 0;
     }
 

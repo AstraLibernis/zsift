@@ -20,7 +20,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const simd = @import("simd.zig");
-const classify = @import("classify.zig");
+const classify = simd.classify; // classification primitives folded into simd.zig
 
 const Reader = std.Io.Reader;
 
@@ -50,7 +50,10 @@ pub fn completeRecordsLen(window: []const u8, opts: Options) usize {
     while (base < window.len) : (base += classify.chunk_len) {
         var t = classify.terminatorsAt(window, base, opts, &carry);
         while (t != 0) {
+            // `t != 0` ⇒ `@clz(t)` ∈ [0, 63] ⇒ `hi` ∈ [0, 63], so the u6 shift-amount
+            // cast below is always in range.
             const hi: usize = 63 - @clz(t);
+            std.debug.assert(hi < 64);
             if (resolveTerminator(window, base + hi)) |boundary| {
                 last = boundary; // highest definitive boundary in this chunk
                 break;
@@ -81,6 +84,7 @@ pub fn streamReader(
     ctx: anytype,
     comptime onField: fn (@TypeOf(ctx), bytes: []const u8, last_in_record: bool) void,
 ) StreamError!void {
+    try opts.validate();
     // Set after a record was terminated by a `\r` sitting at the exact window end:
     // if the next window opens with `\n`, that byte is the CRLF's second half and
     // must be swallowed rather than read as an empty leading record.
@@ -185,6 +189,7 @@ pub fn parseReader(
     ctx: anytype,
     comptime onField: fn (@TypeOf(ctx), bytes: []const u8, last_in_record: bool) void,
 ) !Strategy {
+    try ao.csv.validate(); // fail loud before we allocate, not mid-parse
     const strategy = decide(size_hint, ao.in_memory_threshold);
     switch (strategy) {
         .in_memory => {

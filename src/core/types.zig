@@ -1,0 +1,57 @@
+//! Types shared by the scalar (`csv.Parser`) and SIMD (`csv.SimdParser`) parsers.
+
+pub const Options = struct {
+    /// Byte that separates fields within a record.
+    delimiter: u8 = ',',
+    /// Byte used to quote fields that contain the delimiter, a newline, or a quote.
+    quote: u8 = '"',
+
+    /// Reject configurations the parsers cannot represent unambiguously, so misuse
+    /// fails loud instead of emitting silently-wrong fields.
+    ///
+    /// The SIMD classifier ORs the delimiter, `\n`, and `\r` bitmasks into a single
+    /// "separator" mask and then masks *out* quoted regions using the quote bitmask.
+    /// If the delimiter equalled the quote, or either equalled a record terminator
+    /// (`\n`/`\r`), those masks would overlap and the same byte would be classified
+    /// two ways at once — the parser would split or swallow fields wrongly with no
+    /// error. Rather than trust the caller, we check up front. `init` calls this for
+    /// you; call it yourself before the push/stream entry points if you build
+    /// `Options` from untrusted input.
+    pub fn validate(o: Options) Error!void {
+        if (o.delimiter == o.quote) return Error.InvalidOptions;
+        if (o.delimiter == '\n' or o.delimiter == '\r') return Error.InvalidOptions;
+        if (o.quote == '\n' or o.quote == '\r') return Error.InvalidOptions;
+    }
+};
+
+pub const Error = error{
+    /// A quoted field was opened but the input ended before the closing quote.
+    UnterminatedQuote,
+    /// A closing quote was followed by something other than a delimiter,
+    /// a newline, or end-of-input (e.g. `"ab"c`).
+    InvalidQuote,
+    /// A quoted field contained an escaped quote and needed rewriting, but the
+    /// caller-supplied scratch buffer was too small to hold the result.
+    ScratchTooSmall,
+    /// `nextRecord` was given a destination slice with fewer slots than the
+    /// record has fields.
+    TooManyFields,
+    /// `Options.delimiter`/`quote` are unusable: they collide with each other or
+    /// with a record terminator (`\n`/`\r`). See `Options.validate`.
+    InvalidOptions,
+};
+
+/// One field of a record. `last_in_record` is true when this field is the final
+/// one of its record, i.e. the next field (if any) belongs to a new record.
+///
+/// `bytes` is *borrowed*, never owned: it points either directly into the parser's
+/// input (the zero-copy common case) or into the caller-supplied `scratch` (only
+/// when a quoted field held an escaped `""` that had to be collapsed). A scratch-
+/// backed slice is invalidated by the next `resetScratch()` (which `nextRecord`
+/// calls per record), and every push/stream field is valid only for the duration
+/// of the callback. Copy the bytes if you need to outlive that. Debug builds poison
+/// reclaimed scratch (see `resetScratch`) so a stale retain shows up loudly in tests.
+pub const Field = struct {
+    bytes: []const u8,
+    last_in_record: bool,
+};

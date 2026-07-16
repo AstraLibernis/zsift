@@ -34,9 +34,15 @@ const cities = [_][]const u8{ "Springfield", "Riverside", "Franklin", "Greenvill
 const states = [_][]const u8{ "CA", "TX", "NY", "FL", "OH", "IL", "PA", "GA", "NC", "MI" };
 const words = [_][]const u8{ "invoice", "pending", "review", "urgent", "note", "account", "balance", "overdue", "shipment", "priority", "internal", "memo", "summary", "attached", "report", "meeting", "renewal", "quarter", "escalated", "confirmed" };
 
+/// bufPrint into a caller stack buffer that is always sized large enough here; a
+/// formatting failure would be a benchmark bug, so fail loud rather than hit release UB.
+fn fmtInto(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+    return std.fmt.bufPrint(buf, fmt, args) catch |e| std.debug.panic("experiment fmt: {s}", .{@errorName(e)});
+}
+
 fn appendInt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, n: usize) !void {
     var buf: [24]u8 = undefined;
-    try out.appendSlice(alloc, std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable);
+    try out.appendSlice(alloc, fmtInto(&buf, "{d}", .{n}));
 }
 
 /// Emit `value` as a CSV field, quoting + escaping (`"`→`""`) when it contains a
@@ -73,7 +79,7 @@ pub fn genCorpus(alloc: std.mem.Allocator, escape_pct: u8, target: usize) ![]u8 
         const fnm = first_names[r.uintLessThan(usize, first_names.len)];
         const lnm = last_names[r.uintLessThan(usize, last_names.len)];
         if (r.uintLessThan(u8, 5) == 0) {
-            try emitField(&out, alloc, std.fmt.bufPrint(&field, "{s}, {s}", .{ lnm, fnm }) catch unreachable);
+            try emitField(&out, alloc, fmtInto(&field, "{s}, {s}", .{ lnm, fnm }));
         } else {
             try out.appendSlice(alloc, fnm);
             try out.append(alloc, ' ');
@@ -86,7 +92,7 @@ pub fn genCorpus(alloc: std.mem.Allocator, escape_pct: u8, target: usize) ![]u8 
 
         const city = cities[r.uintLessThan(usize, cities.len)];
         if (r.uintLessThan(u8, 3) == 0) {
-            try emitField(&out, alloc, std.fmt.bufPrint(&field, "{s}, {s}", .{ city, states[r.uintLessThan(usize, states.len)] }) catch unreachable);
+            try emitField(&out, alloc, fmtInto(&field, "{s}, {s}", .{ city, states[r.uintLessThan(usize, states.len)] }));
         } else {
             try out.appendSlice(alloc, city);
         }
@@ -151,7 +157,7 @@ pub fn runDelivery(corpus: []const u8, alloc: std.mem.Allocator) !void {
     while (i < reps) : (i += 1) {
         // pull
         {
-            var p = csv.SimdParser.init(corpus, scratch, .{});
+            var p = csv.SimdParser.init(corpus, scratch, .{}) catch |e| std.debug.panic("bench: {s}", .{@errorName(e)});
             var sum: u64 = 0;
             const t0 = nanoTime();
             while (p.next() catch null) |f| sum +%= f.bytes.len;
@@ -161,7 +167,7 @@ pub fn runDelivery(corpus: []const u8, alloc: std.mem.Allocator) !void {
         }
         // batched pull
         {
-            var p = csv.SimdParser.init(corpus, scratch, .{});
+            var p = csv.SimdParser.init(corpus, scratch, .{}) catch |e| std.debug.panic("bench: {s}", .{@errorName(e)});
             var fbuf: [64]csv.Field = undefined;
             var sum: u64 = 0;
             const t0 = nanoTime();
@@ -206,7 +212,7 @@ pub fn runExperiment(alloc: std.mem.Allocator) !void {
         \\station, on two self-generated corpora: LIGHT (~5% of fields escaped) and
         \\HEAVY (~60%). Numbers are best-of-{d} MB/s and are MACHINE-SPECIFIC and
         \\contention-sensitive on a shared box — for trustworthy numbers run the cells
-        \\under benchfence (see matrix-bench.nu). The winners are what zsift ships.
+        \\under benchfence (`zig build matrix -- <corpus.csv>`). The winners are what zsift ships.
         \\
         \\
     , .{reps});

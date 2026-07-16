@@ -10,6 +10,8 @@ const std = @import("std");
 const csv = @import("csv");
 const methods = @import("methods.zig");
 const experiment = @import("experiment.zig");
+const drive = @import("drive.zig");
+const gen = @import("gen.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -117,7 +119,7 @@ fn generate(alloc: std.mem.Allocator, prof: Profile) ![]u8 {
 /// the same method surface). Returns a checksum (sum of field lengths) so the
 /// optimizer cannot delete the work, plus the record count.
 fn parseOnce(comptime P: type, input: []const u8, scratch: []u8) struct { checksum: u64, rows: u64 } {
-    var p = P.init(input, scratch, .{});
+    var p = P.init(input, scratch, .{}) catch |e| std.debug.panic("bench: {s}", .{@errorName(e)});
     var checksum: u64 = 0;
     var rows: u64 = 0;
     while (p.next() catch null) |first| {
@@ -205,7 +207,7 @@ fn measurePullBatch(corpus: []const u8, scratch: []u8, runs: usize) f64 {
     var best_ns: u64 = std.math.maxInt(u64);
     var i: usize = 0;
     while (i < runs) : (i += 1) {
-        var p = csv.SimdParser.init(corpus, scratch, .{});
+        var p = csv.SimdParser.init(corpus, scratch, .{}) catch |e| std.debug.panic("bench: {s}", .{@errorName(e)});
         var fbuf: [64]csv.Field = undefined;
         var sum: u64 = 0;
         const t0 = nanoTime();
@@ -319,6 +321,18 @@ pub fn main(init: std.process.Init) !void {
     defer if (real) |c| alloc.free(c);
 
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
+
+    // `bench drive <name>` — benchfence UNITS drivers (throughput / matrix / vs-rust /
+    // vs-all / random). Replaces the former Nushell drivers. See `drive.zig`.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "drive")) {
+        return drive.main(init, argv[2..]);
+    }
+
+    // `bench gen <kind> <dir>` — deterministic corpus generators (structured / random).
+    // Replaces the former Python generators. See `gen.zig`.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "gen")) {
+        return gen.main(init, argv[2..]);
+    }
 
     // `bench experiment` — the full method-selection suite on self-generated
     // corpora (no $ZSIFT_CORPUS needed). Also `zig build experiment`.

@@ -32,8 +32,8 @@ absolute MB/s as machine-specific. See caveats.
 ## Method
 
 - **One corpus, every parser.** Each parser reads the *same bytes* off disk. Corpora
-  are generated deterministically by `gen.py` (structured: clean / quoted / escapey)
-  and `genrand.py` (randomized shapes), 16 MiB each, 8-bit ASCII CSV, RFC 4180 quoting.
+  are generated deterministically by `zig build gen-structured` (clean / quoted / escapey)
+  and `zig build gen-random` (randomized shapes), 16 MiB each, 8-bit ASCII CSV, RFC 4180 quoting.
 - **Matched task.** Every parser parses the whole file, iterates every field/cell, and
   sums field byte-lengths (a checksum so nothing is optimized away) while counting
   records + fields. No materialization beyond what each parser does natively.
@@ -121,31 +121,35 @@ clean data (SIMD structural scan dominates) and narrows as quoting/escaping rise
 
 ## Reproduce
 
-From this directory (`bench/vs-csv-parsers/`):
+All commands run from the repo root (`zig build` drives everything):
 
 ```sh
 # build the three parsers
-( cd ../.. && zig build -Doptimize=ReleaseFast )   # zsift
-( cd rustcsv && cargo build --release )            # rust-csv bench
-#   zsv: see BUILD-zsv.md (clone + build + compile zsvbench here)
+zig build -Doptimize=ReleaseFast                          # zsift
+( cd bench/vs-csv-parsers/rustcsv && cargo build --release )  # rust-csv bench
+#   zsv: see BUILD-zsv.md (clone + build + compile zsvbench)
 
-# generate corpora (deterministic; regenerable — not committed)
-python3 gen.py corpus            # clean / quoted / escapey
-python3 genrand.py rcorpus 4     # rand0..rand3
+# generate corpora (deterministic; regenerable — not committed). The default dirs are
+# bench/vs-csv-parsers/{corpus,rcorpus}; override with $ZSIFT_CORPUS_DIR / $ZSIFT_RCORPUS_DIR.
+zig build gen-structured -- bench/vs-csv-parsers/corpus     # clean / quoted / escapey
+zig build gen-random     -- bench/vs-csv-parsers/rcorpus 4  # rand0..rand3 + meta.json
 
-# fenced runs (the fencer is the vendored ../../bench/benchfence binary; no setup needed)
-nu driver-all.nu --reps 12    # three-way (zsift/zsv/rust), structured + random
-nu driver.nu     --reps 15    # zsift vs rust, structured
-nu rdriver.nu    --reps 12    # zsift vs rust, random
+# fenced runs (the fencer is the vendored bench/benchfence binary; no setup needed)
+zig build vs-all  -- --reps 12    # three-way (zsift/zsv/rust), structured + random
+zig build vs-rust -- --reps 15    # zsift vs rust, structured
+zig build random  -- --reps 12    # zsift vs rust, random
 ```
 
-Each driver builds a `[{name, argv}]` unit list and hands it to `bench/benchfence`, which owns
-the gate → measure → retry loop and applies the fence itself (so the units carry no `taskset`).
+These are the `bench drive` subcommands (`src/bench/drive.zig`). Each builds a
+`[{name, argv}]` unit list and hands it to `bench/benchfence`, which owns the
+gate → measure → retry loop and applies the fence itself (so the units carry no `taskset`).
 The corpus path is each unit's trailing argv argument — there is no `$ZSIFT_CORPUS` to set.
+Paths resolve as `$ENV override → repo-relative default → loud error`: a missing comparison
+binary (`$RUSTCSV_BENCH`, `$ZSVBENCH`) or corpus fails loudly rather than silently skipping.
 
 `results/*.json` are the raw recorded outputs (2026-07-07).
 
-> **Note on the generators:** `gen.py` / `genrand.py` are Python purely for disposable
-> data generation — the *measured* code is Zig (zsift), Rust (rust-csv), and C (zsv), fed
-> identical bytes. Corpora are deterministic, so the input is fixed regardless of the
-> generator's language.
+> **Note on the generators:** the corpus generators are now Zig (`zig build gen-*`,
+> `src/bench/gen.zig`) — disposable data-gen only. The *measured* code is Zig (zsift),
+> Rust (rust-csv), and C (zsv), fed identical bytes; corpora are deterministic, so the
+> input is fixed across runs.

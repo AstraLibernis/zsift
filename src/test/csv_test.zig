@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const csv = @import("csv.zig");
+const csv = @import("../csv.zig");
 const Parser = csv.Parser;
 const SimdParser = csv.SimdParser;
 const Options = csv.Options;
@@ -17,7 +17,7 @@ fn parseAll(
     opts: Options,
 ) ![]const []const []const u8 {
     var scratch: [4096]u8 = undefined;
-    var p = Parser.init(input, &scratch, opts);
+    var p = try Parser.init(input, &scratch, opts);
 
     var rows: std.ArrayList([]const []const u8) = .empty;
     defer rows.deinit(alloc);
@@ -85,7 +85,7 @@ test "trailing delimiter yields a final empty field (regression: was a crash)" {
 
 test "nextRecord does not crash on a trailing delimiter at EOF" {
     var scratch: [64]u8 = undefined;
-    var p = Parser.init("a,", &scratch, .{});
+    var p = try Parser.init("a,", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 2), rec.len);
@@ -136,25 +136,25 @@ test "empty quoted field" {
 
 test "unterminated quote errors" {
     var scratch: [64]u8 = undefined;
-    var p = Parser.init("\"abc", &scratch, .{});
+    var p = try Parser.init("\"abc", &scratch, .{});
     try testing.expectError(Error.UnterminatedQuote, p.next());
 }
 
 test "char after closing quote errors" {
     var scratch: [64]u8 = undefined;
-    var p = Parser.init("\"ab\"c\n", &scratch, .{});
+    var p = try Parser.init("\"ab\"c\n", &scratch, .{});
     try testing.expectError(Error.InvalidQuote, p.next());
 }
 
 test "scratch too small errors only when unescaping" {
     var scratch: [1]u8 = undefined;
-    var p = Parser.init("\"a\"\"b\"\n", &scratch, .{}); // collapses to `a"b` (3 bytes)
+    var p = try Parser.init("\"a\"\"b\"\n", &scratch, .{}); // collapses to `a"b` (3 bytes)
     try testing.expectError(Error.ScratchTooSmall, p.next());
 }
 
 test "custom delimiter" {
     var scratch: [64]u8 = undefined;
-    var p = Parser.init("a;b;c\n", &scratch, .{ .delimiter = ';' });
+    var p = try Parser.init("a;b;c\n", &scratch, .{ .delimiter = ';' });
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 3), rec.len);
@@ -164,14 +164,14 @@ test "custom delimiter" {
 
 test "nextRecord too many fields" {
     var scratch: [64]u8 = undefined;
-    var p = Parser.init("a,b,c\n", &scratch, .{});
+    var p = try Parser.init("a,b,c\n", &scratch, .{});
     var buf: [2][]const u8 = undefined;
     try testing.expectError(Error.TooManyFields, p.nextRecord(&buf));
 }
 
 test "nextRecord keeps multiple unescaped fields alive together" {
     var scratch: [64]u8 = undefined;
-    var p = Parser.init("\"a\"\"a\",\"b\"\"b\"\n", &scratch, .{});
+    var p = try Parser.init("\"a\"\"a\",\"b\"\"b\"\n", &scratch, .{});
     var buf: [4][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 2), rec.len);
@@ -212,8 +212,8 @@ test "differential: scalar vs simd agree on a generated corpus" {
 
     var scratch_a: [4096]u8 = undefined;
     var scratch_b: [4096]u8 = undefined;
-    var sp = Parser.init(corpus.items, &scratch_a, .{});
-    var vp = SimdParser.init(corpus.items, &scratch_b, .{});
+    var sp = try Parser.init(corpus.items, &scratch_a, .{});
+    var vp = try SimdParser.init(corpus.items, &scratch_b, .{});
 
     var count: usize = 0;
     while (true) {

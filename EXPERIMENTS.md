@@ -27,7 +27,7 @@ instead, set `ZSIFT_CORPUS=/path/file.csv` and use `bench matrix | width | deliv
 
 **Trust caveat.** Raw throughput on a shared/VM box wanders with host contention, so
 the *absolute* MB/s are machine-specific and only the *relative* ordering is
-meaningful. For trustworthy numbers, gate each measurement: `nu matrix-bench.nu <corpus.csv>`
+meaningful. For trustworthy numbers, gate each measurement: `zig build matrix -- <corpus.csv>`
 drives the detect×collapse cells through the vendored [benchfence](bench/benchfence) binary,
 which proves the core was at its idle baseline before and after every sample.
 

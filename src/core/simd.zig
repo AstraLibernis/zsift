@@ -1,4 +1,5 @@
-//! SIMD fast-path parsers, built on the chunk classifier in `classify.zig`.
+//! SIMD fast-path parsers, built on the chunk classifier (the `classify`
+//! namespace below, folded in from the former `classify.zig`).
 //!
 //! Two front-ends over the same vectorized structural scan:
 //!   * `forEachField` — push: classify each 64-byte chunk, pop separator bits
@@ -9,12 +10,12 @@
 //! Both are zero-allocation; `""` is collapsed only when a quoted field is
 //! materialized (`unescapeInto`).
 //!
-//! Size note (reviewed 2026-07-01, kept whole): this file is one algorithm — the
-//! vectorized scan plus the `quotes_up_to - field_quotes > 2` escape accounting —
-//! deliberately hand-inlined three ways (`forEachField`, `next`, `nextInto`) for
-//! zero per-field call overhead. Splitting push from pull would fragment that
-//! shared logic and make the three copies harder to keep in sync, so it stays one
-//! module despite exceeding the ~300-line guideline.
+//! Size note (kept whole): this file is one algorithm — the vectorized scan plus
+//! the `quotes_up_to - field_quotes > 2` escape accounting — deliberately
+//! hand-inlined three ways (`forEachField`, `next`, `nextInto`) for zero per-field
+//! call overhead. Splitting push from pull would fragment that shared logic and
+//! make the three copies harder to keep in sync. With the `classify` primitives
+//! folded in it sits at ~510 lines, comfortably under the repo's 700-line ceiling.
 //!
 //! IMPORTANT — these assume RFC 4180-strict quoting: a field containing a quote
 //! must be fully quoted. Unlike the scalar parser, a bare quote in the middle of
@@ -22,22 +23,119 @@
 //! the rest of the input as in-string). Use the scalar `Parser` for lenient input.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("types.zig");
+const assert = std.debug.assert;
 
 pub const Options = types.Options;
 pub const Error = types.Error;
 pub const Field = types.Field;
 
-const classify = @import("classify.zig");
+/// SIMD chunk-classification primitives — the vector layer the parsers build on.
+/// Folded in from the former `classify.zig` (one module, per the 700-line
+/// consolidation). Each helper works on a 64-byte chunk (`@Vector(64, u8)`)
+/// following the simdjson/simdcsv approach (Langdale & Lemire): compare bytes in
+/// parallel, `@bitCast` each `@Vector(64, bool)` to a `u64` (a movemask on x86),
+/// then turn the quote bitmask into an "inside a quoted region" mask via a parallel
+/// prefix-XOR. In-quote state threads across chunks via `carry` (0 or ~0). Escaped
+/// `""` needs no special case for *structure*: the prefix-XOR toggles the region
+/// off then immediately on again, so no separator between the pair is exposed.
+pub const classify = struct {
+    pub const chunk_len = 64;
+    const Vec = @Vector(chunk_len, u8);
+
+    /// Parallel prefix-XOR (inclusive scan) of a 64-bit mask: output bit i is the
+    /// XOR of input bits 0..=i — set wherever an odd number of quotes lie at or
+    /// before it, i.e. "inside a quoted region". Portable 6× shift-XOR doubling
+    /// (Zig has no carry-less-multiply builtin; branchless on every target).
+    inline fn prefixXor(x: u64) u64 {
+        var r = x;
+        r ^= r << 1;
+        r ^= r << 2;
+        r ^= r << 4;
+        r ^= r << 8;
+        r ^= r << 16;
+        r ^= r << 32;
+        return r;
+    }
+
+    /// Load the chunk at `base`: a full 64 bytes directly (no copy) when available,
+    /// otherwise the final short chunk zero-padded. Padding bytes are 0, so they
+    /// never match a separator.
+    inline fn loadVec(input: []const u8, base: usize) Vec {
+        // Callers step `base` by `chunk_len` while `base < input.len`, so `base` is
+        // at most `input.len`; the short-chunk path below computes `input.len - base`
+        // and would underflow (huge @memcpy) if that ever broke. Guard it.
+        assert(base <= input.len);
+        if (base + chunk_len <= input.len) return input[base..][0..chunk_len].*;
+        var buf: [chunk_len]u8 = @splat(0);
+        @memcpy(buf[0 .. input.len - base], input[base..]);
+        return buf;
+    }
+
+    /// Quote bitmask plus the "inside a quoted region" bitmask for `v`, folding the
+    /// end-of-chunk in-quote state into `carry` (0 or ~0).
+    inline fn quoteBitsAndInside(v: Vec, quote: u8, carry: *u64) struct { quotes: u64, inside: u64 } {
+        const quote_bits: u64 = @bitCast(v == @as(Vec, @splat(quote)));
+        const inside = prefixXor(quote_bits) ^ carry.*;
+        carry.* = @bitCast(@as(i64, @bitCast(inside)) >> 63);
+        return .{ .quotes = quote_bits, .inside = inside };
+    }
+
+    /// "Inside a quoted region" bitmask (discards the quote positions).
+    inline fn quoteInsideMask(v: Vec, quote: u8, carry: *u64) u64 {
+        return quoteBitsAndInside(v, quote, carry).inside;
+    }
+
+    /// Separators plus the chunk's quote bitmask (see `classifyAtFull`).
+    pub const Classified = struct { seps: u64, quotes: u64 };
+
+    /// Field/record separators (delimiter, `\n`, `\r`) outside quoted regions.
+    pub inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
+        const v = loadVec(input, base);
+        const inside = quoteInsideMask(v, opts.quote, carry);
+        const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
+        const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
+        const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
+        return (delim_bits | lf_bits | cr_bits) & ~inside;
+    }
+
+    /// Like `classifyAt`, but also returns the chunk's quote bitmask, so a parser
+    /// can detect a field's escaped `""` from bits already computed.
+    pub inline fn classifyAtFull(input: []const u8, base: usize, opts: Options, carry: *u64) Classified {
+        const v = loadVec(input, base);
+        const qi = quoteBitsAndInside(v, opts.quote, carry);
+        const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
+        const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
+        const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
+        return .{ .seps = (delim_bits | lf_bits | cr_bits) & ~qi.inside, .quotes = qi.quotes };
+    }
+
+    /// Record terminators (`\n`, `\r`) outside quoted regions. Used by streaming to
+    /// find record boundaries. (Delimiters excluded — a record ends only on newline.)
+    pub inline fn terminatorsAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
+        const v = loadVec(input, base);
+        const inside = quoteInsideMask(v, opts.quote, carry);
+        const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
+        const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
+        return (lf_bits | cr_bits) & ~inside;
+    }
+};
+
 const classifyAt = classify.classifyAt;
 const classifyAtFull = classify.classifyAtFull;
-const chunk_len = classify.chunk_len;
+// NB: no file-level `chunk_len` alias — it would collide with `classify.chunk_len`
+// inside the nested struct (Zig flags an outer/inner same-name ref as ambiguous).
+// Use `classify.chunk_len` at the (few) call sites below.
 
 /// Prefix popcount: number of quote bits at positions [0, rel) of a chunk mask.
 /// Added to a running cross-chunk total this gives "quotes up to a position", so a
 /// field's escape status is `(quotes_up_to(end) - quotes_up_to(start)) > 2` — its
 /// two bookend quotes plus any escaped `""`. Works across chunks; no byte re-scan.
 inline fn quotesBelow(q: u64, rel: usize) u64 {
+    // `rel` is a within-chunk bit index (`@ctz` of a nonzero 64-bit mask), so it is
+    // in [0, 64); the `@intCast` to the u6 shift amount below is only valid there.
+    assert(rel < 64);
     const below: u64 = (@as(u64, 1) << @intCast(rel)) -% 1;
     return @popCount(q & below);
 }
@@ -64,6 +162,8 @@ inline fn swarIndexOfPos(s: []const u8, start: usize, b: u8) ?usize {
 /// separator ends a record. A delimiter continues the record (`last = false`);
 /// `\n`, `\r`, or `\r\n` end it. A trailing empty field is owed when `!last`.
 inline fn recordStep(input: []const u8, at: usize, delim: u8) struct { next_start: usize, last: bool } {
+    // `at` is a separator position produced by the classifier, always a real byte.
+    assert(at < input.len);
     if (input[at] == delim) return .{ .next_start = at + 1, .last = false };
     const ns = if (input[at] == '\r' and at + 1 < input.len and input[at + 1] == '\n') at + 2 else at + 1;
     return .{ .next_start = ns, .last = true };
@@ -107,7 +207,7 @@ pub fn countSeparators(input: []const u8, opts: Options) u64 {
     var carry: u64 = 0;
     var total: u64 = 0;
     var base: usize = 0;
-    while (base < input.len) : (base += chunk_len) {
+    while (base < input.len) : (base += classify.chunk_len) {
         total += @popCount(classifyAt(input, base, opts, &carry));
     }
     return total;
@@ -134,6 +234,7 @@ pub fn forEachField(
     ctx: anytype,
     comptime onField: fn (@TypeOf(ctx), bytes: []const u8, last_in_record: bool) void,
 ) Error!void {
+    try opts.validate();
     const quote = opts.quote;
     const delim = opts.delimiter;
     var field_start: usize = 0;
@@ -145,7 +246,7 @@ pub fn forEachField(
     // A field needs collapsing iff more than its two bookend quotes lie in it.
     var qbc: u64 = 0;
     var fs_q: u64 = 0;
-    while (base < input.len) : (base += chunk_len) {
+    while (base < input.len) : (base += classify.chunk_len) {
         const cl = classifyAtFull(input, base, opts, &carry);
         var s = cl.seps;
         // A chunk with no quote bytes can hold no escape, so `quotes_up_to` is just
@@ -156,6 +257,9 @@ pub fn forEachField(
             s &= s - 1;
             const at = base + rel;
             if (at < field_start) continue; // trailing '\n' of a CRLF
+            // A separator sits at `at >= field_start` and `at < input.len`, so the
+            // current field opens at a real byte — the unguarded index below is safe.
+            assert(field_start < input.len);
             var needs = false;
             if (input[field_start] == quote) {
                 // Only a quoted field can need collapsing. Unquoted fields skip this
@@ -214,7 +318,8 @@ pub const SimdParser = struct {
     /// field is owed even if the input ends here (`"a,"` is `["a", ""]`).
     pending: bool,
 
-    pub fn init(input: []const u8, scratch: []u8, opts: Options) SimdParser {
+    pub fn init(input: []const u8, scratch: []u8, opts: Options) Error!SimdParser {
+        try opts.validate();
         return .{
             .input = input,
             .scratch = scratch,
@@ -234,6 +339,9 @@ pub const SimdParser = struct {
     }
 
     pub fn resetScratch(self: *SimdParser) void {
+        // Debug-only: poison the reclaimed scratch so a retained unescaped `Field`
+        // reads obvious garbage instead of stale-but-valid bytes. Zero cost in release.
+        if (builtin.mode == .Debug) @memset(self.scratch[0..self.scratch_used], 0xAA);
         self.scratch_used = 0;
     }
 
@@ -244,7 +352,7 @@ pub const SimdParser = struct {
         self.structural = cl.seps;
         self.quotes = cl.quotes;
         self.scan_base = self.next_base;
-        self.next_base += chunk_len;
+        self.next_base += classify.chunk_len;
     }
 
     /// Turn a raw field slice into its value (see `unescapeInto`), advancing the
@@ -270,6 +378,7 @@ pub const SimdParser = struct {
                 // The trailing '\n' of a CRLF sits before field_start; skip it.
                 if (at < self.field_start) continue;
 
+                assert(self.field_start < self.input.len); // separator ⇒ field opens at a real byte
                 var needs = false;
                 if (self.input[self.field_start] == self.opts.quote) {
                     const q_up_to = if (self.quotes != 0) self.quotes_before + quotesBelow(self.quotes, rel) else self.quotes_before;
@@ -351,6 +460,7 @@ pub const SimdParser = struct {
                 structural &= structural - 1;
                 const at = scan_base + rel;
                 if (at < field_start) continue; // trailing '\n' of a CRLF
+                assert(field_start < self.input.len); // separator ⇒ field opens at a real byte
                 var needs = false;
                 if (self.input[field_start] == quote) {
                     const q_up_to = if (quotes != 0) quotes_before + quotesBelow(quotes, rel) else quotes_before;
@@ -392,7 +502,7 @@ pub const SimdParser = struct {
             structural = cl.seps;
             quotes = cl.quotes;
             scan_base = next_base;
-            next_base += chunk_len;
+            next_base += classify.chunk_len;
         }
         self.structural = structural;
         self.quotes = quotes;

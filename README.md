@@ -224,10 +224,11 @@ bench` swings 30%+ between identical runs. Gate each sample through benchfence:
 
 ```sh
 zig build -Doptimize=ReleaseFast
-nu bench.nu --reps 20
+zig build throughput -- --reps 20
 ```
 
-`bench.nu` is a benchfence **units** driver: it builds a `[{name, argv}]` unit list and hands
+`zig build throughput` runs the in-binary benchfence **units** driver (`bench drive throughput`,
+in `src/bench/drive.zig`): it builds a `[{name, argv}]` unit list and hands
 it to the vendored `bench/benchfence` binary, which OWNS the gate → measure → postcheck → retry
 loop. benchfence pins each unit to a quiet physical core, disables ASLR, sets `LC_ALL=C`, quiets
 the desktop, and — before AND after every sample — proves the core is back at its idle speed,

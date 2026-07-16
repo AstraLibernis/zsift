@@ -3,14 +3,14 @@
 
 const std = @import("std");
 const testing = std.testing;
-const simd = @import("simd.zig");
+const simd = @import("../core/simd.zig");
 const SimdParser = simd.SimdParser;
 const forEachField = simd.forEachField;
 const Error = simd.Error;
 
 test "simd: simple record across the rest of a chunk" {
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init("a,b,c\n", &scratch, .{});
+    var p = try SimdParser.init("a,b,c\n", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 3), rec.len);
@@ -21,7 +21,7 @@ test "simd: simple record across the rest of a chunk" {
 
 test "simd: quoted field with embedded delimiter and newline" {
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init("\"a,b\",\"c\nd\"\n", &scratch, .{});
+    var p = try SimdParser.init("\"a,b\",\"c\nd\"\n", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 2), rec.len);
@@ -31,7 +31,7 @@ test "simd: quoted field with embedded delimiter and newline" {
 
 test "simd: escaped quotes collapse" {
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init("\"she said \"\"hi\"\"\",x\n", &scratch, .{});
+    var p = try SimdParser.init("\"she said \"\"hi\"\"\",x\n", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqualStrings("she said \"hi\"", rec[0]);
@@ -40,7 +40,7 @@ test "simd: escaped quotes collapse" {
 
 test "simd: crlf terminators" {
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init("a,b\r\nc,d\r\n", &scratch, .{});
+    var p = try SimdParser.init("a,b\r\nc,d\r\n", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const r1 = (try p.nextRecord(&buf)).?;
     try testing.expectEqualStrings("a", r1[0]);
@@ -61,7 +61,7 @@ test "simd: field straddling a 64-byte chunk boundary" {
     try src.append(alloc, '\n');
 
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init(src.items, &scratch, .{});
+    var p = try SimdParser.init(src.items, &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 2), rec.len);
@@ -78,7 +78,7 @@ test "simd: quoted field straddling a chunk boundary" {
     try src.appendSlice(alloc, "\",end\n");
 
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init(src.items, &scratch, .{});
+    var p = try SimdParser.init(src.items, &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 2), rec.len);
@@ -88,7 +88,7 @@ test "simd: quoted field straddling a chunk boundary" {
 
 test "simd: no trailing newline" {
     var scratch: [256]u8 = undefined;
-    var p = SimdParser.init("a,b", &scratch, .{});
+    var p = try SimdParser.init("a,b", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 2), rec.len);
@@ -97,7 +97,7 @@ test "simd: no trailing newline" {
 
 test "simd: unterminated quote errors" {
     var scratch: [64]u8 = undefined;
-    var p = SimdParser.init("\"abc", &scratch, .{});
+    var p = try SimdParser.init("\"abc", &scratch, .{});
     try testing.expectError(Error.UnterminatedQuote, p.next());
 }
 
@@ -129,7 +129,7 @@ test "simd: forEachField matches nextRecord" {
 
 test "simd: empty fields" {
     var scratch: [64]u8 = undefined;
-    var p = SimdParser.init("a,,c\n", &scratch, .{});
+    var p = try SimdParser.init("a,,c\n", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 3), rec.len);
@@ -138,7 +138,7 @@ test "simd: empty fields" {
 
 test "simd: trailing delimiter yields a final empty field" {
     var scratch: [64]u8 = undefined;
-    var p = SimdParser.init("a,b,", &scratch, .{});
+    var p = try SimdParser.init("a,b,", &scratch, .{});
     var buf: [8][]const u8 = undefined;
     const rec = (try p.nextRecord(&buf)).?;
     try testing.expectEqual(@as(usize, 3), rec.len);
@@ -246,7 +246,7 @@ test "simd: differential fuzz — push and pull match generated fields" {
         try testing.expectEqual(expected.items.len, col.i);
 
         // Pull path.
-        var p = SimdParser.init(csv.items, scratch, .{});
+        var p = try SimdParser.init(csv.items, scratch, .{});
         var idx: usize = 0;
         while (try p.next()) |field| : (idx += 1) {
             try testing.expect(idx < expected.items.len);
@@ -256,7 +256,7 @@ test "simd: differential fuzz — push and pull match generated fields" {
         try testing.expectEqual(expected.items.len, idx);
 
         // Batched-pull path (nextInto) — a small batch size to exercise refills.
-        var pb = SimdParser.init(csv.items, scratch, .{});
+        var pb = try SimdParser.init(csv.items, scratch, .{});
         var fbuf: [5]simd.Field = undefined;
         var bidx: usize = 0;
         while (true) {

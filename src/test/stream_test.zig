@@ -3,9 +3,9 @@
 
 const std = @import("std");
 const testing = std.testing;
-const csv = @import("csv.zig");
-const simd = @import("simd.zig");
-const stream = @import("stream.zig");
+const csv = @import("../csv.zig");
+const simd = @import("../core/simd.zig");
+const stream = @import("../core/stream.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
