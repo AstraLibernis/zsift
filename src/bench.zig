@@ -300,6 +300,14 @@ fn envCorpus(init: std.process.Init, alloc: std.mem.Allocator) !?[]u8 {
     return try std.Io.Dir.cwd().readFileAlloc(init.io, path, alloc, .unlimited);
 }
 
+/// Read a corpus CSV named EXPLICITLY as an argv argument. benchfence execs a unit's argv
+/// directly — no shell, no env, no $VAR — so a benchfence-driven run passes the corpus PATH as a
+/// trailing argument (`bench <profile> <path> <corpus.csv>` / `bench cell <d> <c> <corpus.csv>`)
+/// rather than via $ZSIFT_CORPUS. The argv path takes precedence over the env fallback.
+fn readCorpus(init: std.process.Init, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(init.io, path, alloc, .unlimited);
+}
+
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.page_allocator;
     const print = std.debug.print;
@@ -374,10 +382,14 @@ pub fn main(init: std.process.Init) !void {
     // `bench cell <detect> <collapse>` — single-shot ONE matrix cell over
     // $ZSIFT_CORPUS, printing BENCHFENCE_METRIC for a benchfence driver to gate.
     if (argv.len >= 4 and std.mem.eql(u8, argv[1], "cell")) {
-        const corpus = real orelse {
-            print("cell mode needs $ZSIFT_CORPUS set to a CSV file\n", .{});
-            return error.NoCorpus;
-        };
+        // Corpus as a trailing argv arg (benchfence unit form) — else the $ZSIFT_CORPUS fallback.
+        const corpus = if (argv.len >= 5)
+            try readCorpus(init, alloc, argv[4])
+        else
+            real orelse {
+                print("cell mode needs a corpus: `bench cell <detect> <collapse> <corpus.csv>` (or $ZSIFT_CORPUS)\n", .{});
+                return error.NoCorpus;
+            };
         const mbps = try methods.runCell(argv[2], argv[3], corpus, alloc);
         print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
         return;
@@ -395,7 +407,11 @@ pub fn main(init: std.process.Init) !void {
         var ss_scratch: [64 * 1024]u8 = undefined;
         var ss_window: [stream_window]u8 = undefined;
         var ss_stream_scratch: [stream_window]u8 = undefined;
-        const mbps = if (real) |corpus|
+        // A trailing argv corpus (`bench <profile> <path> <corpus.csv>`, the benchfence unit form)
+        // wins over $ZSIFT_CORPUS; with neither, fall back to the synthetic profile named by argv[1].
+        const argv_corpus: ?[]u8 = if (argv.len >= 4) try readCorpus(init, alloc, argv[3]) else null;
+        const corpus_bytes: ?[]const u8 = argv_corpus orelse real;
+        const mbps = if (corpus_bytes) |corpus|
             measurePath(corpus, sel, &ss_scratch, &ss_window, &ss_stream_scratch)
         else blk: {
             const prof = parseProfile(argv[1]) orelse {
@@ -404,7 +420,7 @@ pub fn main(init: std.process.Init) !void {
             };
             break :blk try measureOne(alloc, prof, sel);
         };
-        // benchfence/driver reads this exact key (lib/driver.nu metric_of).
+        // The one line benchfence reads (last BENCHFENCE_METRIC= wins).
         print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
         return;
     }

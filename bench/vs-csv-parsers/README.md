@@ -133,11 +133,15 @@ From this directory (`bench/vs-csv-parsers/`):
 python3 gen.py corpus            # clean / quoted / escapey
 python3 genrand.py rcorpus 4     # rand0..rand3
 
-# fenced runs (edit the hardcoded benchfence path at the top of the drivers first)
-benchfence --bound mem --run driver-all.nu --reps 12    # three-way (zsift/zsv/rust)
-benchfence --bound mem --run driver.nu     --reps 15    # zsift vs rust, structured
-benchfence --bound mem --run rdriver.nu    --reps 12    # zsift vs rust, random
+# fenced runs (the fencer is the vendored ../../bench/benchfence binary; no setup needed)
+nu driver-all.nu --reps 12    # three-way (zsift/zsv/rust), structured + random
+nu driver.nu     --reps 15    # zsift vs rust, structured
+nu rdriver.nu    --reps 12    # zsift vs rust, random
 ```
+
+Each driver builds a `[{name, argv}]` unit list and hands it to `bench/benchfence`, which owns
+the gate → measure → retry loop and applies the fence itself (so the units carry no `taskset`).
+The corpus path is each unit's trailing argv argument — there is no `$ZSIFT_CORPUS` to set.
 
 `results/*.json` are the raw recorded outputs (2026-07-07).
 

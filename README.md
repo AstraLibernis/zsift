@@ -224,23 +224,24 @@ bench` swings 30%+ between identical runs. Gate each sample through benchfence:
 
 ```sh
 zig build -Doptimize=ReleaseFast
-benchfence --bound mem --run bench.nu --reps 20
+nu bench.nu --reps 20
 ```
 
-`bench.nu` is a benchfence level-2 driver, run under [benchfence](https://codeberg.org/AstraLibernis/benchfence)
-(pins to a quiet physical core, ASLR off, perf governor, quiets the desktop), which
-takes a calibration before and after. A run's numbers are **certified only when
-both calibrations sit within tolerance of the venue's measured floor** — i.e. the
-whole run happened at the machine's idle speed. Note that low *drift* alone isn't
-enough: a uniformly-busy machine reads stable-but-slow, so the gate compares
-against the floor, not just pre-vs-post. On a contended VM it retries; if no quiet
-window appears it still prints the best-effort run, but bannered UNTRUSTWORTHY.
+`bench.nu` is a benchfence **units** driver: it builds a `[{name, argv}]` unit list and hands
+it to the vendored `bench/benchfence` binary, which OWNS the gate → measure → postcheck → retry
+loop. benchfence pins each unit to a quiet physical core, disables ASLR, sets `LC_ALL=C`, quiets
+the desktop, and — before AND after every sample — proves the core is back at its idle speed,
+discarding and re-measuring any sample the machine spoiled mid-flight. That is *per-sample* trust
+("level 2"). A unit's `best_trusted` is the best of only the gate-passed samples; a uniformly-busy
+machine reads stable-but-slow, so the gate compares against the venue's measured floor, not just
+pre-vs-post. zsift is a CSV parser — memory-bound — so the driver gates on the **mem referee**
+(`--bound mem`): the CPU referee is blind to the DRAM-bandwidth contention that actually slows it.
 
-benchfence is an external dependency. `bench.nu` / `matrix-bench.nu` currently
-`use` it from a hardcoded `~/projects/benchfence`; point them elsewhere by editing
-that path at the top of each script. The deeper *per-measurement* gating
-(`fence.nu`: wait for quiet before each measurement, retry contended ones) is a
-possible follow-up.
+benchfence is vendored as a single static binary at [`bench/benchfence`](bench/benchfence)
+(~900 KB; see [`bench/benchfence.version`](bench/benchfence.version) for the exact build). Nothing
+to install or build — it ships with the repo. Override it with `$BENCHFENCE` if you want a
+different one; if neither the override nor the vendored binary exists, the driver fails loudly
+rather than running unfenced.
 
 ## Prior art surveyed (2026-06-30)
 
