@@ -24,7 +24,7 @@ def units []: nothing -> list {
     } | flatten
 }
 
-def main [--reps: int = 12, --out: string = ""] {
+def main [--reps: int = 12, --wait: string = "normal", --out: string = ""] {
     let o = (if ($out | is-empty) { $HERE | path join results random.json } else { $out })
-    run-units (units) --reps $reps --out $o
+    run-units (units) --reps $reps --wait $wait --out $o
 }

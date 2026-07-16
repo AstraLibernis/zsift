@@ -46,9 +46,11 @@ export def run-units [
     } else {
         let dir = ($out | path dirname)
         if not ($dir | is-empty) { mkdir $dir }
-        # Provenance: keep the exact units list beside the results — version-control the tests you ran.
-        $units | to json | save --force ($out | str replace --regex '\.json$' '.units.json')
         ^$bf --units $uf --bound $bound --wait $wait --reps $reps --metric $metric --direction $direction --out $out
+        # Provenance — written ONLY after a successful run (a failing `^$bf` errors above, so no
+        # orphan .units.json is left beside missing results): the exact units list beside the
+        # results, version-controlling the tests you ran.
+        $units | to json | save --force ($out | str replace --regex '\.json$' '.units.json')
     }
     rm --force $uf
 }

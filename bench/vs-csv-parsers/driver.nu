@@ -25,7 +25,7 @@ def units []: nothing -> list {
     } | flatten
 }
 
-def main [--reps: int = 15, --out: string = ""] {
+def main [--reps: int = 15, --wait: string = "normal", --out: string = ""] {
     let o = (if ($out | is-empty) { $HERE | path join results structured.json } else { $out })
-    run-units (units) --reps $reps --out $o
+    run-units (units) --reps $reps --wait $wait --out $o
 }

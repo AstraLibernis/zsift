@@ -37,6 +37,6 @@ def units []: nothing -> list {
     } | flatten
 }
 
-def main [--reps: int = 20] {
-    run-units (units) --reps $reps
+def main [--reps: int = 20, --wait: string = "normal"] {
+    run-units (units) --reps $reps --wait $wait
 }

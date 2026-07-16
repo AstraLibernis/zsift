@@ -41,6 +41,6 @@ def units [corpus: string]: nothing -> list {
     }
 }
 
-def main [corpus: string, --reps: int = 10] {
-    run-units (units $corpus) --reps $reps
+def main [corpus: string, --reps: int = 10, --wait: string = "normal"] {
+    run-units (units $corpus) --reps $reps --wait $wait
 }
