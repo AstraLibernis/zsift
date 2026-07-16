@@ -58,7 +58,7 @@ fn nanoTime() u64 {
 pub fn main(init: std.process.Init, args: []const []const u8) !void {
     const alloc = init.arena.allocator(); // process-lifetime arena; freed on exit
     if (args.len == 0) {
-        print("usage: bench drive <throughput|matrix|vs-rust|vs-all|random> [args]\n", .{});
+        print("usage: bench drive <throughput|matrix|vs-rust|vs-all|vs-serde|random> [args]\n", .{});
         return DriveError.BadArgs;
     }
     const name = args[0];
@@ -67,8 +67,9 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     if (eql(u8, name, "matrix")) return matrix(init, alloc, rest);
     if (eql(u8, name, "vs-rust")) return vsRust(init, alloc, rest);
     if (eql(u8, name, "vs-all")) return vsAll(init, alloc, rest);
+    if (eql(u8, name, "vs-serde")) return vsSerde(init, alloc, rest);
     if (eql(u8, name, "random")) return random(init, alloc, rest);
-    print("unknown driver '{s}' (throughput|matrix|vs-rust|vs-all|random)\n", .{name});
+    print("unknown driver '{s}' (throughput|matrix|vs-rust|vs-all|vs-serde|random)\n", .{name});
     return DriveError.UnknownDriver;
 }
 
@@ -269,6 +270,30 @@ fn vsRust(init: std.process.Init, alloc: Allocator, rest: []const []const u8) !v
         try units.append(alloc, try mkUnit(alloc, try std.fmt.allocPrint(alloc, "rust/byterecord/{s}", .{c}), &.{ rust, "byterecord", f }));
         try units.append(alloc, try mkUnit(alloc, try std.fmt.allocPrint(alloc, "rust/core/{s}", .{c}), &.{ rust, "core", f }));
     }
+    try runUnits(init, alloc, units.items, opts);
+}
+
+/// The honest end-to-end typed comparison: zsift `reader(TypedRow)` vs rust-csv's serde
+/// `deserialize::<Row>()`, both parsing the same header'd `typed.csv` INTO a struct (the
+/// apples-to-apples task the untyped byterecord/core modes don't measure). Replaces
+/// nothing — this is a new comparison. Default artifact: <corpus_dir>/../results/typed.json.
+fn vsSerde(init: std.process.Init, alloc: Allocator, rest: []const []const u8) !void {
+    var opts = RunOptions{ .reps = 12 };
+    var pos: std.ArrayList([]const u8) = .empty;
+    try parseFlags(alloc, rest, &opts, &pos);
+
+    const zsift = try zsiftBin(init);
+    const rust = try rustBin(init);
+    const cdir = envOr(init, "ZSIFT_CORPUS_DIR", paths.corpus_dir);
+    if (opts.out.len == 0) opts.out = paths.results_typed;
+
+    const f = try std.fmt.allocPrint(alloc, "{s}/typed.csv", .{cdir});
+    try requireFile(init.io, f, "typed corpus", "generate it: `zig build gen-typed -- <corpus_dir>`");
+
+    var units: std.ArrayList(Unit) = .empty;
+    // `x` is a throwaway profile name; argv form is `bench <profile> typed <corpus>`.
+    try units.append(alloc, try mkUnit(alloc, "zsift/typed", &.{ zsift, "x", "typed", f }));
+    try units.append(alloc, try mkUnit(alloc, "rust/serde", &.{ rust, "serde", f }));
     try runUnits(init, alloc, units.items, opts);
 }
 

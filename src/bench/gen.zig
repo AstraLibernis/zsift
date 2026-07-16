@@ -29,7 +29,8 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     }
     if (eql(u8, args[0], "structured")) return structured(init, alloc, args[1..]);
     if (eql(u8, args[0], "random")) return random(init, alloc, args[1..]);
-    print("unknown generator '{s}' (structured|random)\n", .{args[0]});
+    if (eql(u8, args[0], "typed")) return typed(init, alloc, args[1..]);
+    print("unknown generator '{s}' (structured|random|typed)\n", .{args[0]});
     return GenError.BadArgs;
 }
 
@@ -100,6 +101,55 @@ fn genStructured(alloc: Allocator, quote_pct: u8, escape_pct: u8) ![]u8 {
         try out.append(alloc, '\n');
     }
     return out.toOwnedSlice(alloc);
+}
+
+// ---------------------------------------------------------------------------
+// Typed corpus (for the honest reader(T) vs rust-csv serde benchmark)
+// ---------------------------------------------------------------------------
+
+/// The header + column types match `bench.zig`'s `TypedRow` and the rust `serde` mode:
+/// id (i64), price (f64), flag (bool), name ([]const u8), category (enum tag). Every
+/// cell is clean (no quoting/escaping needed) so all three parsers deserialize it.
+pub const typed_header = "id,price,flag,name,category\n";
+const typed_names = [_][]const u8{
+    "alpha", "bravo", "charlie", "delta", "echo",  "foxtrot",
+    "golf",  "hotel", "india",   "juliet", "kilo", "lima",
+};
+const typed_cats = [_][]const u8{ "alpha", "bravo", "charlie", "delta" };
+
+/// Deterministic ~16 MiB typed CSV with a header row. Reused by `bench <p> typed`
+/// (standalone) and written to `typed.csv` by `bench gen typed`.
+pub fn genTypedBytes(alloc: Allocator) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(0x7D_9E_D0_0C);
+    const r = prng.random();
+    var out: std.ArrayList(u8) = .empty;
+    try out.ensureTotalCapacity(alloc, target_bytes + 4096);
+    try out.appendSlice(alloc, typed_header);
+    var line: [128]u8 = undefined;
+    while (out.items.len < target_bytes) {
+        const id = r.intRangeAtMost(i64, -1_000_000, 1_000_000_000);
+        const price = r.float(f64) * 10_000.0;
+        const flag = r.boolean();
+        const name = typed_names[r.uintLessThan(usize, typed_names.len)];
+        const cat = typed_cats[r.uintLessThan(usize, typed_cats.len)];
+        const row = try std.fmt.bufPrint(&line, "{d},{d:.2},{s},{s},{s}\n", .{
+            id, price, if (flag) "true" else "false", name, cat,
+        });
+        try out.appendSlice(alloc, row);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn typed(init: std.process.Init, alloc: Allocator, rest: []const []const u8) !void {
+    if (rest.len == 0) {
+        print("usage: bench gen typed <dir>\n", .{});
+        return GenError.BadArgs;
+    }
+    const dir = rest[0];
+    try ensureDir(init, dir);
+    const bytes = try genTypedBytes(alloc);
+    try writeCorpus(init, alloc, dir, "typed.csv", bytes);
+    print("typed.csv: {d:.2} MiB (header: {s})\n", .{ mib(bytes.len), std.mem.trimEnd(u8, typed_header, "\n") });
 }
 
 // ---------------------------------------------------------------------------

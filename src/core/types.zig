@@ -1,5 +1,12 @@
 //! Types shared by the scalar (`csv.Parser`) and SIMD (`csv.SimdParser`) parsers.
 
+const std = @import("std");
+const convert = @import("convert.zig");
+
+/// Re-exported so a single `@import("types.zig")` reaches both `Field` and the
+/// conversion error set its methods return.
+pub const ConvertError = convert.ConvertError;
+
 pub const Options = struct {
     /// Byte that separates fields within a record.
     delimiter: u8 = ',',
@@ -54,4 +61,39 @@ pub const Error = error{
 pub const Field = struct {
     bytes: []const u8,
     last_in_record: bool,
+
+    // Opt-in typed access over the borrowed bytes. These delegate to `convert.zig`
+    // and never touch the parser's hot path (adding methods leaves `Field`'s layout
+    // unchanged); an unused converter compiles to nothing. See `convert.as`.
+
+    /// Convert the field to `T` (int/float/bool/enum/`[]const u8`/optional-of-those).
+    pub fn as(self: Field, comptime T: type) convert.ConvertError!T {
+        return convert.as(self.bytes, T);
+    }
+    pub fn asInt(self: Field, comptime T: type) convert.ConvertError!T {
+        return convert.asInt(self.bytes, T);
+    }
+    pub fn asFloat(self: Field, comptime T: type) convert.ConvertError!T {
+        return convert.asFloat(self.bytes, T);
+    }
+    pub fn asBool(self: Field) convert.ConvertError!bool {
+        return convert.asBool(self.bytes);
+    }
+    pub fn asEnum(self: Field, comptime T: type) convert.ConvertError!T {
+        return convert.asEnum(self.bytes, T);
+    }
+    /// An empty field is `null`; otherwise convert to `T`.
+    pub fn asOptional(self: Field, comptime T: type) convert.ConvertError!?T {
+        return if (self.bytes.len == 0) null else try convert.as(self.bytes, T);
+    }
+    pub fn isEmpty(self: Field) bool {
+        return self.bytes.len == 0;
+    }
+    pub fn eql(self: Field, s: []const u8) bool {
+        return std.mem.eql(u8, self.bytes, s);
+    }
+    /// Zero-copy: a sub-slice with surrounding ASCII whitespace stripped. Still borrows.
+    pub fn trimmed(self: Field) Field {
+        return .{ .bytes = std.mem.trim(u8, self.bytes, " \t\r\n"), .last_in_record = self.last_in_record };
+    }
 };

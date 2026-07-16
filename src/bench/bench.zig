@@ -59,6 +59,19 @@ fn nanoTime() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
+/// Shared typed-row schema for the honest end-to-end benchmark: `csv.reader(TypedRow)`
+/// vs rust-csv's serde `deserialize::<Row>()` (see rustcsv/src/main.rs `serde` mode),
+/// both parsing the same header'd `typed.csv` into a struct. Columns must match the
+/// generated header `id,price,flag,name,category` (see gen.zig `typed_header`).
+const Category = enum { alpha, bravo, charlie, delta };
+const TypedRow = struct {
+    id: i64,
+    price: f64,
+    flag: bool,
+    name: []const u8,
+    category: Category,
+};
+
 const Profile = struct {
     name: []const u8,
     /// 0..100 chance a given field is quoted.
@@ -227,6 +240,36 @@ fn measurePullBatch(corpus: []const u8, scratch: []u8, runs: usize) f64 {
     return mb / secs;
 }
 
+/// Best-of-`runs` MB/s for the typed path: `csv.reader(TypedRow)` deserializing every
+/// record into a struct (the same task rust-csv's serde mode does). `corpus` MUST carry
+/// the `id,price,flag,name,category` header row (use `bench gen typed` / genTypedBytes).
+/// This is the honest end-to-end number — parse *and* convert — not the raw scan.
+fn measureTyped(corpus: []const u8, scratch: []u8, runs: usize) f64 {
+    var best_ns: u64 = std.math.maxInt(u64);
+    var i: usize = 0;
+    while (i < runs) : (i += 1) {
+        var rdr = csv.reader(TypedRow).init(corpus, scratch, .{}) catch |e|
+            std.debug.panic("typed reader init failed: {s}", .{@errorName(e)});
+        rdr.withHeader() catch |e|
+            std.debug.panic("typed corpus needs an id,price,flag,name,category header: {s}", .{@errorName(e)});
+        var sum: u64 = 0;
+        const t0 = nanoTime();
+        while (rdr.next() catch |e| std.debug.panic("typed row parse failed: {s}", .{@errorName(e)})) |row| {
+            sum +%= @as(u64, @bitCast(row.id));
+            sum +%= @as(u64, @intFromFloat(@abs(row.price)));
+            sum +%= @intFromBool(row.flag);
+            sum +%= row.name.len;
+            sum +%= @intFromEnum(row.category);
+        }
+        const dt = nanoTime() - t0;
+        std.mem.doNotOptimizeAway(sum);
+        if (dt < best_ns) best_ns = dt;
+    }
+    const secs = @as(f64, @floatFromInt(best_ns)) / 1e9;
+    const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
+    return mb / secs;
+}
+
 const stream_window = 64 * 1024;
 
 /// Best-of-`runs` MB/s for the structural-scan ceiling (separator count, no
@@ -247,10 +290,10 @@ fn measureScan(corpus: []const u8, runs: usize) f64 {
 }
 
 /// The selectable measurement paths, one per column of the human table.
-const PathSel = enum { scalar, pull, push, stream, ceil };
+const PathSel = enum { scalar, pull, push, stream, ceil, typed };
 
 fn parsePath(name: []const u8) ?PathSel {
-    inline for (.{ "scalar", "pull", "push", "stream", "ceil" }, std.enums.values(PathSel)) |n, v| {
+    inline for (.{ "scalar", "pull", "push", "stream", "ceil", "typed" }, std.enums.values(PathSel)) |n, v| {
         if (std.mem.eql(u8, name, n)) return v;
     }
     return null;
@@ -270,6 +313,13 @@ fn measureOne(alloc: std.mem.Allocator, prof: Profile, sel: PathSel) !f64 {
     var scratch: [64 * 1024]u8 = undefined;
     var window: [stream_window]u8 = undefined;
     var stream_scratch: [stream_window]u8 = undefined;
+    // The typed path ignores the (headerless) synthetic profiles — it needs the typed
+    // corpus with a header, so it generates its own deterministic one.
+    if (sel == .typed) {
+        const tc = try gen.genTypedBytes(alloc);
+        defer alloc.free(tc);
+        return measureTyped(tc, &scratch, iters);
+    }
     const corpus = try generate(alloc, prof);
     defer alloc.free(corpus);
     return switch (sel) {
@@ -278,6 +328,7 @@ fn measureOne(alloc: std.mem.Allocator, prof: Profile, sel: PathSel) !f64 {
         .push => measureCallback(corpus, &scratch, iters),
         .stream => measureStream(corpus, &window, &stream_scratch, iters),
         .ceil => measureScan(corpus, iters),
+        .typed => unreachable, // handled above
     };
 }
 
@@ -290,6 +341,7 @@ fn measurePath(corpus: []const u8, sel: PathSel, scratch: []u8, window: []u8, st
         .push => measureCallback(corpus, scratch, iters),
         .stream => measureStream(corpus, window, stream_scratch, iters),
         .ceil => measureScan(corpus, iters),
+        .typed => measureTyped(corpus, scratch, iters),
     };
 }
 
@@ -415,7 +467,7 @@ pub fn main(init: std.process.Init) !void {
     // No args → the human table below (best-of-iters per cell, all paths).
     if (argv.len >= 3) {
         const sel = parsePath(argv[2]) orelse {
-            print("unknown path '{s}' (scalar|pull|push|stream|ceil)\n", .{argv[2]});
+            print("unknown path '{s}' (scalar|pull|push|stream|ceil|typed)\n", .{argv[2]});
             return error.BadPath;
         };
         var ss_scratch: [64 * 1024]u8 = undefined;

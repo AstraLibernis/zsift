@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
     build_paths.addOption([]const u8, "results_structured", b.pathFromRoot("bench/vs-csv-parsers/results/structured.json"));
     build_paths.addOption([]const u8, "results_comparison", b.pathFromRoot("bench/vs-csv-parsers/results/comparison-zsift-zsv-rust.json"));
     build_paths.addOption([]const u8, "results_random", b.pathFromRoot("bench/vs-csv-parsers/results/random.json"));
+    build_paths.addOption([]const u8, "results_typed", b.pathFromRoot("bench/vs-csv-parsers/results/typed.json"));
     bench_mod.addOptions("build_paths", build_paths);
 
     const bench = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
@@ -66,6 +67,7 @@ pub fn build(b: *std.Build) void {
     // Corpus generators (replace the former Python gen.py / genrand.py).
     addGenStep(b, bench, "structured", "gen-structured", "Generate the structured corpora: `zig build gen-structured -- <dir>`");
     addGenStep(b, bench, "random", "gen-random", "Generate randomized corpora + meta.json: `zig build gen-random -- <dir> [N]`");
+    addGenStep(b, bench, "typed", "gen-typed", "Generate the typed corpus (header'd typed.csv): `zig build gen-typed -- <dir>`");
 
     // benchfence UNITS drivers (replace the former Nushell drivers). Each execs the
     // vendored benchfence binary over `zig-out/bin/bench`, so they depend on the install.
@@ -73,6 +75,7 @@ pub fn build(b: *std.Build) void {
     addDriveStep(b, bench, "matrix", "matrix", "DETECT×COLLAPSE matrix over a corpus: `zig build matrix -- <corpus.csv>`");
     addDriveStep(b, bench, "vs-rust", "vs-rust", "Compare zsift vs rust-csv over the structured corpora");
     addDriveStep(b, bench, "vs-all", "vs-all", "Compare zsift vs zsv vs rust over structured + random corpora");
+    addDriveStep(b, bench, "vs-serde", "vs-serde", "Honest typed compare: zsift reader(T) vs rust-csv serde over typed.csv");
     addDriveStep(b, bench, "random", "random", "Compare zsift vs rust-csv over the randomized corpora");
 }
 

@@ -1,7 +1,9 @@
 // zsift-vs-rust-csv benchmark. Matched task: parse the whole corpus, sum every
-// field's (unquoted) byte length, count records+fields. Two rust-csv layers:
+// field's (unquoted) byte length, count records+fields. rust-csv layers:
 //   byterecord = csv::Reader + reused ByteRecord (the common high-level fast path)
 //   core       = csv_core::Reader (no_std DFA, no allocation — the true peer to zsift)
+//   serde      = csv::Reader + deserialize::<Row>() (TYPED rows — the honest peer to
+//                zsift's reader(T); parses INTO a struct, not just raw bytes)
 // Reads $CORPUS (or argv[2]); best-of-7 internal; prints BENCHFENCE_METRIC=<MB/s>
 // on stdout and "records fields sumlen" on stderr for cross-validation.
 use std::io::Cursor;
@@ -53,6 +55,46 @@ fn bench_core(data: &[u8]) -> (u64, u64, u64) {
     (records, fields, sumlen)
 }
 
+// Typed row matching zsift's TypedRow and the generated header
+// `id,price,flag,name,category`. serde deserializes each record straight into this
+// struct — the same work zsift's reader(TypedRow) does — so the comparison is
+// apples-to-apples (typed vs typed), unlike the raw-bytes byterecord/core modes.
+#[derive(serde::Deserialize)]
+struct Row {
+    id: i64,
+    price: f64,
+    flag: bool,
+    name: String,
+    category: Category,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Category {
+    Alpha,
+    Bravo,
+    Charlie,
+    Delta,
+}
+
+fn bench_serde(data: &[u8]) -> (u64, u64, u64) {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(Cursor::new(data));
+    let (mut records, mut sumlen) = (0u64, 0u64);
+    for r in rdr.deserialize::<Row>() {
+        let row = r.expect("valid typed row");
+        records += 1;
+        sumlen = sumlen
+            .wrapping_add(row.id as u64)
+            .wrapping_add(row.price.abs() as u64)
+            .wrapping_add(row.flag as u64)
+            .wrapping_add(row.name.len() as u64)
+            .wrapping_add(row.category as u64);
+    }
+    (records, records, sumlen)
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "byterecord".into());
     let path = std::env::args().nth(2)
@@ -62,7 +104,8 @@ fn main() {
     let f = match mode.as_str() {
         "byterecord" => bench_byterecord as fn(&[u8]) -> (u64, u64, u64),
         "core" => bench_core as fn(&[u8]) -> (u64, u64, u64),
-        other => panic!("unknown mode '{other}' (byterecord|core)"),
+        "serde" => bench_serde as fn(&[u8]) -> (u64, u64, u64),
+        other => panic!("unknown mode '{other}' (byterecord|core|serde)"),
     };
     // warm + validate
     let (records, fields, sumlen) = f(&data);

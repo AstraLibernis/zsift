@@ -17,19 +17,29 @@ ratios are the point).
 
 It is deliberately **not** a full-featured CSV library. It does not:
 
-- deserialize rows into typed structs (no serde-style mapping);
 - **write** CSV — it is read-only;
 - support rich dialects beyond a configurable delimiter + quote (no comment chars,
-  trimming, per-column rules);
+  per-column rules; whitespace trimming is available per-field via `Field.trimmed`);
 - validate UTF-8 or detect encodings;
 - hand you an owned, durable record — a `Field` is a byte-slice that *borrows* the
   input (zero-copy), valid only as long as the input (or scratch) lives.
 
 The missing features and the speed are the **same decision**: zsift hands back
-borrowed bytes and gets out of the way, so owning, typing, and validating them is
-the caller's job. If you need those conveniences more than raw throughput, reach for
-a full parser like [`rust-csv`](https://github.com/BurntSushi/rust-csv) — zsift is
-the racecar you bolt onto a pipeline that already knows what it wants from each field.
+borrowed bytes and gets out of the way, so owning and validating them is the caller's
+job. If you need owned records, a writer, or UTF-8 validation more than raw
+throughput, reach for a full parser like
+[`rust-csv`](https://github.com/BurntSushi/rust-csv) — zsift is the racecar you bolt
+onto a pipeline that already knows what it wants from each field.
+
+**Typing, though, is now built in — without taxing the raw path.** An *opt-in* layer
+sits over the borrowed fields: convert a field with `field.as(T)`, reach columns by
+name with a `Header`, or deserialize whole records into a struct with `reader(T)`
+(see [Typed layers](#typed-layers)). It costs nothing when unused (Zig compiles only
+what you call) and, when used, you pay only for the fields you actually type — the
+same conversion cost *any* parser pays. The raw `forEachField`/`SimdParser` scan is
+byte-for-byte untouched. This is the opposite of `rust-csv`'s serde path, which types
+on the hot path; a fenced end-to-end comparison (both deserializing into the same
+struct) still put zsift ahead — by a smaller, honest margin than the untyped scan.
 
 ## Design
 
@@ -77,6 +87,7 @@ The in-memory parsers are zero-allocation and share `Options` / `Field` / `Error
 | Fastest, push | `zsift.simd.forEachField` | slice | RFC-4180 strict | inlined callback, no per-field call |
 | Streaming | `zsift.streamReader` | `*std.Io.Reader` | RFC-4180 strict | bounded memory, push callback |
 | Auto | `zsift.parseReader` | `*std.Io.Reader` | RFC-4180 strict | picks slurp vs stream by size |
+| Typed rows | `zsift.reader(T)` | slice | RFC-4180 strict | opt-in struct deserialize over `SimdParser` (see [Typed layers](#typed-layers)) |
 
 ```zig
 const zsift = @import("zsift");
@@ -114,6 +125,52 @@ Errors: `UnterminatedQuote`, `InvalidQuote` (text after a closing quote),
 `ScratchTooSmall`, `TooManyFields`, `InvalidOptions` (delimiter equals quote, or
 either is a `\n`/`\r`; returned by `init` and the push/stream entry points);
 streaming adds `RecordTooLong`, `ReadFailed`.
+
+## Typed layers
+
+Everything above hands back a borrowed `Field` (`bytes` + `last_in_record`). On top
+of that sit three **opt-in** layers that make the fields *usable* — named columns,
+typed values, whole-struct rows — without touching the scanner. They cost nothing
+when unused (Zig compiles only reachable code) and, when used, convert only the
+fields you ask for. All three preserve the borrow: a `[]const u8` a layer hands back
+still points into the input (or scratch), valid only until the next read.
+
+```zig
+// 1. Field converters — parse a borrowed field on demand (fail loud on bad input).
+const age: u32 = try field.as(u32);        // int / float / bool / enum / []const u8
+const note: ?[]const u8 = try field.asOptional([]const u8); // empty cell -> null
+const clean = field.trimmed();             // zero-copy sub-slice, still borrowed
+
+// 2. Header — reach columns by name (zero-alloc view over the first record).
+var slots: [32][]const u8 = undefined;
+const header = zsift.Header.capture(first_record, &slots); // survives later reads
+if (header.col(record, "email")) |f| use(f.bytes);
+
+// 3. reader(T) — deserialize each record straight into your struct.
+const Row = struct { id: i64, price: f64, active: bool, name: []const u8 };
+var rdr = try zsift.reader(Row).init(input, &scratch, .{});
+try rdr.withHeader();                        // opt-in: match struct names to columns
+while (try rdr.next()) |row| use(row.id, row.name); // row borrows until the next next()
+```
+
+`reader(T)` maps struct field *i* to column *i* by default; `withHeader` instead
+matches struct field **names** against the first record (any column order). It
+monomorphizes per struct — the per-record fill is an `inline for` that lowers to
+exactly the converters your fields need. Supported field types: ints, floats, `bool`,
+enums (exact tag match), `[]const u8`, and optionals of those (an empty cell →
+`null`); any other type is a **compile error** naming the type. A record wider than a
+strict `reader(T)` is a `TooManyFields` error — use `readerWide(T, max_cols)` for
+headered CSVs with columns your struct doesn't name. There's also a `Record` view
+(`rec.at(i)`, `rec.get("name")`, `rec.as(i, T)`) for ad-hoc access without a struct.
+
+Converters return real errors (`ConvertError.{InvalidInt,InvalidFloat,InvalidBool,
+InvalidEnum}`), never a silent default; `reader` adds `MissingColumn`,
+`MissingHeaderColumn`, `EmptyHeader`. **Lifetime:** a returned `T` (or `Field`) with
+`[]const u8` fields borrows the input/scratch and is valid only until the next
+`next()`; copy the bytes to keep them. Value fields (ints/floats/bools/enums) are
+independent copies and always safe. The quoted-empty `""` and a truly-empty cell are
+indistinguishable (both `len == 0`), so an optional treats both as `null`; use
+`[]const u8` if you need the empty string.
 
 ### Streaming + auto-selection
 
@@ -154,19 +211,25 @@ zig build experiment -Doptimize=ReleaseFast # method-selection bake-off (EXPERIM
 ## Source layout
 
 Layered so each concern is one small, independently testable module
-(types → simd(classify) → {scalar, stream} → facade). Source is grouped into
-`src/core/` (the parser), `src/bench/` (benchmark + drivers), and `src/test/`:
+(convert → types → simd(classify) → {scalar, stream} → {header, record, reader} →
+facade). Source is grouped into `src/core/` (the parser + typed layers),
+`src/bench/` (benchmark + drivers), and `src/test/`:
 
 | File | Lines | Role |
 |------|-------|------|
-| `core/types.zig`  | ~55  | `Options` (+ `validate`) / `Field` / `Error`, shared by every parser |
+| `core/convert.zig` | ~75  | `[]const u8 → T` field converters (`as`/`asInt`/…) + `ConvertError` — the bottom layer |
+| `core/types.zig`  | ~95  | `Options` (+ `validate`) / `Field` (+ typed methods) / `Error`, shared by every parser |
 | `core/scalar.zig` | ~195 | `Parser` — lenient byte-at-a-time, in-memory |
 | `core/simd.zig`   | ~520 | `SimdParser` (pull / `nextInto`) + `forEachField` (push) + the `classify` chunk primitives (folded in); mask-based escape detect + run-based `""` collapse |
 | `core/stream.zig` | ~210 | `streamReader` + auto-selecting `parseReader` |
-| `csv.zig`         | ~45  | public API facade — re-exports only |
+| `core/header.zig` | ~55  | zero-alloc name→column view over a header record |
+| `core/reader.zig` | ~120 | `reader(T)` / `readerWide(T, n)` — opt-in typed struct rows over `SimdParser` |
+| `core/record.zig` | ~50  | ergonomic borrowed `Record` view (`.at` / `.get` / `.as` / `.count`) |
+| `csv.zig`         | ~70  | public API facade — re-exports only |
 
 Tests live in `src/test/` (`csv_test.zig` / `simd_test.zig` / `stream_test.zig` /
-`options_test.zig`; the leaf modules `types` / `scalar` are covered by `csv_test.zig`
+`options_test.zig` / `convert_test.zig` / `header_test.zig` (+ `Record`) /
+`reader_test.zig`; the leaf modules `types` / `scalar` are covered by `csv_test.zig`
 and `options_test.zig`) and are pulled into `zig build test` from `csv.zig`.
 
 ## How the SIMD path works
