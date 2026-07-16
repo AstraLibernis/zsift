@@ -83,8 +83,8 @@ const zsift = @import("zsift");
 
 var scratch: [4096]u8 = undefined;          // only touched for "" unescaping
 
-// Scalar, field at a time:
-var p = zsift.Parser.init(input, &scratch, .{ .delimiter = ',', .quote = '"' });
+// Scalar, field at a time. `init` validates Options and is fallible:
+var p = try zsift.Parser.init(input, &scratch, .{ .delimiter = ',', .quote = '"' });
 while (try p.next()) |f| {
     use(f.bytes);
     if (f.last_in_record) endRow();
@@ -111,7 +111,9 @@ const strategy = try zsift.parseReader(gpa, &reader, size_hint, .{}, &sink, Sink
 ```
 
 Errors: `UnterminatedQuote`, `InvalidQuote` (text after a closing quote),
-`ScratchTooSmall`, `TooManyFields`; streaming adds `RecordTooLong`, `ReadFailed`.
+`ScratchTooSmall`, `TooManyFields`, `InvalidOptions` (delimiter equals quote, or
+either is a `\n`/`\r`; returned by `init` and the push/stream entry points);
+streaming adds `RecordTooLong`, `ReadFailed`.
 
 ### Streaming + auto-selection
 
@@ -152,21 +154,20 @@ zig build experiment -Doptimize=ReleaseFast # method-selection bake-off (EXPERIM
 ## Source layout
 
 Layered so each concern is one small, independently testable module
-(types → classify → {scalar, simd, stream} → facade):
+(types → simd(classify) → {scalar, stream} → facade). Source is grouped into
+`src/core/` (the parser), `src/bench/` (benchmark + drivers), and `src/test/`:
 
 | File | Lines | Role |
 |------|-------|------|
-| `types.zig`    | ~30  | `Options` / `Field` / `Error`, shared by every parser |
-| `classify.zig` | ~100 | SIMD chunk-classification primitives (the vector layer) |
-| `scalar.zig`   | ~190 | `Parser` — lenient byte-at-a-time, in-memory |
-| `simd.zig`     | ~395 | `SimdParser` (pull / `nextInto`) + `forEachField` (push); mask-based escape detect + run-based `""` collapse |
-| `stream.zig`   | ~175 | `streamReader` + auto-selecting `parseReader` |
-| `csv.zig`      | ~40  | public API facade — re-exports only |
+| `core/types.zig`  | ~55  | `Options` (+ `validate`) / `Field` / `Error`, shared by every parser |
+| `core/scalar.zig` | ~195 | `Parser` — lenient byte-at-a-time, in-memory |
+| `core/simd.zig`   | ~520 | `SimdParser` (pull / `nextInto`) + `forEachField` (push) + the `classify` chunk primitives (folded in); mask-based escape detect + run-based `""` collapse |
+| `core/stream.zig` | ~210 | `streamReader` + auto-selecting `parseReader` |
+| `csv.zig`         | ~45  | public API facade — re-exports only |
 
-Tests live in `csv_test.zig` / `simd_test.zig` / `stream_test.zig` (the small
-leaf modules `types`/`classify`/`scalar` are covered by `csv_test.zig`) and are
-pulled into `zig build
-test` from `csv.zig`.
+Tests live in `src/test/` (`csv_test.zig` / `simd_test.zig` / `stream_test.zig` /
+`options_test.zig`; the leaf modules `types` / `scalar` are covered by `csv_test.zig`
+and `options_test.zig`) and are pulled into `zig build test` from `csv.zig`.
 
 ## How the SIMD path works
 
