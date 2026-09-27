@@ -381,3 +381,7 @@ deserialization, writing — are *out of scope*, not backlog. The only conceivab
 further work is speed, not surface — trimming field-delivery overhead (the remaining
 gap to the scan ceiling) and multi-core parsing at safe record boundaries — and
 neither is planned. zsift is done until a real workload asks for one.
+
+## License
+
+MIT. See `LICENSE`.
