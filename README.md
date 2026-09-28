@@ -384,4 +384,14 @@ neither is planned. zsift is done until a real workload asks for one.
 
 ## License
 
-MIT. See `LICENSE`.
+LGPL-3.0-or-later · Copyright (C) 2026 AstraLibernis
+
+zsift is free software: you can redistribute it and/or modify it under the terms of the GNU Lesser General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. See `COPYING.LESSER`, which builds on the GNU General Public License in `COPYING`.
+
+In short: any program, open or closed, may use this library, but the library itself and every change to it stay free.
+
+**Exception: `bench/benchfence`.** The benchmark-fencing binary bundled under `bench/` is a separate tool by the same author, released under the MIT License. It is not part of the library.
+
+Versions up to and including commit `31ce1c9` were released under the MIT License; copies obtained under those terms keep them.
+
+Contributions are welcome under the [Developer Certificate of Origin](https://developercertificate.org/): sign off each commit with `git commit -s`. You keep the copyright on your contribution.
