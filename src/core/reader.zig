@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Typed row reader: deserialize each record straight into a caller struct `T`.
 //!
 //! This is an opt-in layer built entirely on the unchanged `SimdParser.nextRecord` —

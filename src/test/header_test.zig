@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Header (name→column) view, exercised over a real SimdParser record.
 
 const std = @import("std");

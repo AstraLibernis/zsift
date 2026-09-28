@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! bench/drive.zig — the benchfence UNITS drivers, in Zig.
 //!
 //! Replaces the former Nushell layer (bench.nu, matrix-bench.nu, bench/units.nu, and

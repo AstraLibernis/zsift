@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Tests for the streaming parser and the auto-selecting facade. Referenced from
 //! `csv.zig`'s test block so they run under `zig build test`.
 

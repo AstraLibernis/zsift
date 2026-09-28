@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! A zero-allocation view over a record's column names, so fields can be reached by
 //! name instead of position. Built entirely on top of the borrowed slices a parser
 //! already produces — no scanner code, no allocation.

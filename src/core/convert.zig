@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! On-demand conversion of a borrowed field's bytes into a typed value. The bottom
 //! of the zsift layering: imports only `std`, operates on `[]const u8` (never on
 //! `Field`), so there is no import cycle with `types.zig`. Every converter here is

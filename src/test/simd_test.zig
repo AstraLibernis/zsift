@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Unit tests for the SIMD parser. Referenced from `csv.zig`'s test block so
 //! they run under `zig build test`.
 

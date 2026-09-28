@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Tests for `Options` validation (the fail-loud guard against configurations the
 //! parsers cannot represent) and the debug-only scratch poisoning that backs the
 //! `Field.bytes` lifetime contract. Referenced from `csv.zig`'s test block.

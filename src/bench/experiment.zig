@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Reproducible method-selection experiment — the proof behind zsift's parser
 //! choices. `zig build experiment` (or `bench experiment`) generates deterministic
 //! corpora and runs every bake-off in one report, so anyone can see WHY the shipped

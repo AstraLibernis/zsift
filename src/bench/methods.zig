@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Experiment harness (not part of the shipped parser): a DETECT × COLLAPSE
 //! matrix over quoted-field handling. For each combination it parses the WHOLE
 //! corpus with the push structure and reports throughput plus whether the output

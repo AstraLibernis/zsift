@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Throughput benchmark for the zsift parser.
 //!
 //! Generates a deterministic corpus for several "profiles" (clean data, quoted

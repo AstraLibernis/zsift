@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Scalar (byte-at-a-time) CSV parser — the lenient, in-memory reference.
 //!
 //! Operates on a `[]const u8` and never allocates. It hands back one `Field` at a

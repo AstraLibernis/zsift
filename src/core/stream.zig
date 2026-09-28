@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Streaming CSV over a `std.Io.Reader`, plus an auto-selecting facade that
 //! picks between slurp-into-memory and streaming based on input size.
 //!

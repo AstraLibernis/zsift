@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 /* zsv side of the zsift-vs-zsv racecar comparison. Matched task: parse the whole
    corpus, sum every cell's byte length, count rows+cells. Reads $CORPUS (or argv[1]);
    best-of-7; prints BENCHFENCE_METRIC=<MB/s> on stdout, "rows cells sumlen" on stderr. */

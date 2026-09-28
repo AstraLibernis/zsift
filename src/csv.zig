@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! zsift — public API surface for parsing delimited/tabular text (CSV by default;
 //! the delimiter and quote are configurable). This file only re-exports; the
 //! implementations live in focused modules under `core/`:

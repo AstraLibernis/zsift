@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! An ergonomic, borrowed view over one record's fields — positional (`at`/`as`) and,
 //! when a `Header` is attached, by name (`get`). Backed by the `[]const []const u8`
 //! that `SimdParser.nextRecord` already produces, so it adds no scanner code and no

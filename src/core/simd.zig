@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! SIMD fast-path parsers, built on the chunk classifier (the `classify`
 //! namespace below, folded in from the former `classify.zig`).
 //!

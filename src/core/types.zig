@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 //! Types shared by the scalar (`csv.Parser`) and SIMD (`csv.SimdParser`) parsers.
 
 const std = @import("std");

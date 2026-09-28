@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 AstraLibernis
+
 // zsift-vs-rust-csv benchmark. Matched task: parse the whole corpus, sum every
 // field's (unquoted) byte length, count records+fields. rust-csv layers:
 //   byterecord = csv::Reader + reused ByteRecord (the common high-level fast path)
