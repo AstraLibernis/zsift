@@ -319,7 +319,7 @@ benchfence is vendored as a single static binary at [`bench/benchfence`](bench/b
 (~900 KB; see [`bench/benchfence.version`](bench/benchfence.version) for the exact build). Nothing
 to install or build — it ships with the repo. It is also the only surviving copy: this project moved
 from Codeberg to GitHub (2026-09-29) because of Codeberg's anti-AI rules, and benchfence's source
-was lost in the move. Override it with `$BENCHFENCE` if you want a
+was lost in the move. What it does is written up in [`bench/BENCHFENCE.md`](bench/BENCHFENCE.md). Override it with `$BENCHFENCE` if you want a
 different one; if neither the override nor the vendored binary exists, the driver fails loudly
 rather than running unfenced.
 
