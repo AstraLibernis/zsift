@@ -49,6 +49,9 @@ pub const Error = error{
     /// `Options.delimiter`/`quote` are unusable: they collide with each other or
     /// with a record terminator (`\n`/`\r`). See `Options.validate`.
     InvalidOptions,
+    /// `parallel.forEachField` was given more workers than `parallel.max_workers`,
+    /// or a different number of scratch buffers than sinks.
+    BadWorkerCount,
 };
 
 /// One field of a record. `last_in_record` is true when this field is the final

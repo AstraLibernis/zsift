@@ -3,7 +3,11 @@
 
 //! bench/compare.zig — alternating comparison of parser paths (replaces benchfence).
 //!
-//!   bench compare [--rounds N] [--paths scalar,pull,push,stream] [--out PATH] [files/dirs]
+//!   bench compare [--rounds N] [--paths scalar,pull,push,stream,par] [--workers N]
+//!                 [--out PATH] [files/dirs]
+//!
+//! `par` is `parallel.forEachField` with `--workers` workers (default: one per CPU) on
+//! the process's `std.Io`.
 //!
 //! A path may be suffixed `@base` (e.g. `--paths push,push@base`) to run it on the zsift
 //! compiled in with `-Dbaseline=<other zsift>/src/csv.zig` — an A/B across versions.
@@ -38,7 +42,9 @@ fn nanoTime() u64 {
 }
 
 const Sum = struct {
-    sum: u64 = 0,
+    // Own cache line per sink: the parallel path gives each worker one, and adjacent
+    // counters would make the workers fight over a shared line on every field.
+    sum: u64 align(std.atomic.cache_line) = 0,
     fn on(self: *Sum, bytes: []const u8, last: bool) void {
         self.sum +%= bytes.len + @intFromBool(last);
     }
@@ -53,12 +59,20 @@ const Contender = struct {
         return std.fmt.bufPrint(buf, "{s}{s}", .{ @tagName(c.path), if (c.base) "@base" else "" }) catch "?";
     }
 
-    fn outcome(c: Contender, text: []const u8) verify.Outcome {
-        return if (c.base) verify.outcome(csv_base, c.path, text) else verify.outcome(csv, c.path, text);
+    fn outcome(c: Contender, io: Io, text: []const u8) verify.Outcome {
+        return if (c.base) verify.outcome(csv_base, io, c.path, text) else verify.outcome(csv, io, c.path, text);
     }
 };
 
-const Bufs = struct { scratch: []u8, window: []u8, stream_scratch: []u8 };
+const Bufs = struct {
+    scratch: []u8,
+    window: []u8,
+    stream_scratch: []u8,
+    io: Io,
+    par_scratches: [][]u8,
+    par_sinks: []Sum,
+    par_ptrs: []*Sum,
+};
 
 /// One full pass of `c` over `text`; returns a checksum so the work cannot be elided.
 fn pass(c: Contender, text: []const u8, b: Bufs) !u64 {
@@ -81,6 +95,12 @@ fn passWith(comptime C: type, path: Path, text: []const u8, b: Bufs) !u64 {
             var mr = MemReader.init(b.window, text);
             try C.streamReader(&mr.interface, b.stream_scratch, .{}, &s, Sum.on);
         },
+        .par => {
+            if (!@hasDecl(C, "parallel")) return error.NoParallelInThisZsift;
+            for (b.par_sinks) |*w| w.* = .{};
+            try C.parallel.forEachField(b.io, text, .{}, b.par_scratches, b.par_ptrs, Sum.on);
+            for (b.par_sinks) |w| s.sum +%= w.sum;
+        },
     }
     return s.sum;
 }
@@ -100,7 +120,7 @@ fn parsePaths(alloc: Allocator, spec: []const u8) ![]Contender {
         const base = std.mem.endsWith(u8, item, "@base");
         const name = if (base) item[0 .. item.len - 5] else item;
         const p = std.meta.stringToEnum(Path, name) orelse {
-            print("error: unknown path '{s}' (scalar|pull|push|stream, optionally @base)\n", .{item});
+            print("error: unknown path '{s}' (scalar|pull|push|stream|par, optionally @base)\n", .{item});
             return error.BadArgs;
         };
         if (base and bench_options.baseline == null) {
@@ -118,13 +138,14 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     const alloc = init.arena.allocator();
 
     var rounds: usize = 15;
+    var n_workers: usize = @min(std.Thread.getCpuCount() catch 4, csv.parallel.max_workers);
     var paths: []const Contender = &.{ .{ .path = .scalar }, .{ .path = .pull }, .{ .path = .push }, .{ .path = .stream } };
     var out_path: ?[]const u8 = null;
     var roots: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (std.mem.eql(u8, a, "--rounds") or std.mem.eql(u8, a, "--paths") or std.mem.eql(u8, a, "--out")) {
+        if (std.mem.eql(u8, a, "--rounds") or std.mem.eql(u8, a, "--paths") or std.mem.eql(u8, a, "--out") or std.mem.eql(u8, a, "--workers")) {
             i += 1;
             if (i >= args.len) {
                 print("error: {s} needs a value\n", .{a});
@@ -136,6 +157,12 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
                     return error.BadArgs;
                 };
                 if (rounds == 0) return error.BadArgs;
+            } else if (std.mem.eql(u8, a, "--workers")) {
+                n_workers = std.fmt.parseInt(usize, args[i], 10) catch 0;
+                if (n_workers == 0 or n_workers > csv.parallel.max_workers) {
+                    print("error: --workers must be 1..{d}, got '{s}'\n", .{ csv.parallel.max_workers, args[i] });
+                    return error.BadArgs;
+                }
             } else if (std.mem.eql(u8, a, "--paths")) {
                 paths = try parsePaths(alloc, args[i]);
             } else out_path = args[i];
@@ -154,14 +181,23 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     }
     if (out_path) |p| if (std.fs.path.dirname(p)) |d| try Io.Dir.cwd().createDirPath(io, d);
 
+    const par_scratches = try alloc.alloc([]u8, n_workers);
+    for (par_scratches) |*sc| sc.* = try alloc.alloc(u8, window_len);
+    const par_sinks = try alloc.alloc(Sum, n_workers);
+    const par_ptrs = try alloc.alloc(*Sum, n_workers);
+    for (par_ptrs, par_sinks) |*p, *w| p.* = w;
     const bufs = Bufs{
         .scratch = try alloc.alloc(u8, 1 << 20),
         .window = try alloc.alloc(u8, window_len),
         .stream_scratch = try alloc.alloc(u8, window_len),
+        .io = io,
+        .par_scratches = par_scratches,
+        .par_sinks = par_sinks,
+        .par_ptrs = par_ptrs,
     };
     const n = paths.len;
     const cpus = std.Thread.getCpuCount() catch 0;
-    print("alternating comparison: {d} rounds (+1 warm-up), {d} logical CPUs, not fenced — read the ratios\n", .{ rounds, cpus });
+    print("alternating comparison: {d} rounds (+1 warm-up), {d} logical CPUs, par = {d} workers, not fenced — read the ratios\n", .{ rounds, cpus, n_workers });
     if (bench_options.baseline) |bp| print("baseline (@base): {s}\n", .{bp});
     print("\n", .{});
 
@@ -175,9 +211,9 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
             const text = try Io.Dir.cwd().readFileAlloc(io, file, alloc, .unlimited);
 
             // Identical output first, or the timings compare different work.
-            const ref = paths[0].outcome(text);
+            const ref = paths[0].outcome(io, text);
             var agree = ref.err == null;
-            for (paths[1..]) |c| agree = agree and c.outcome(text).eql(ref);
+            for (paths[1..]) |c| agree = agree and c.outcome(io, text).eql(ref);
             if (!agree) {
                 print("SKIP  {s}: paths disagree or error — run `bench verify` on it\n", .{file});
                 n_skipped += 1;

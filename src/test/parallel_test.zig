@@ -135,3 +135,137 @@ test "parallel: one record spanning every cut gives empty middle ranges" {
     try parallel.splitRecords(input, .{}, &bounds);
     try testing.expectEqual(try digestWhole(input), try digestSplit(input, &bounds));
 }
+
+// ---------------------------------------------------------------------------
+// parallel.forEachField: concatenated sink output == serial output, errors == serial
+// ---------------------------------------------------------------------------
+
+/// Serializes every field it receives (length-prefixed bytes + record-end flag).
+const Collector = struct {
+    out: std.ArrayList(u8) = .empty,
+    fail: bool = false,
+
+    fn on(self: *Collector, bytes: []const u8, last: bool) void {
+        const len: u32 = @intCast(bytes.len);
+        self.out.appendSlice(testing.allocator, std.mem.asBytes(&len)) catch {
+            self.fail = true;
+        };
+        self.out.appendSlice(testing.allocator, bytes) catch {
+            self.fail = true;
+        };
+        self.out.append(testing.allocator, @intFromBool(last)) catch {
+            self.fail = true;
+        };
+    }
+};
+
+fn serialOf(input: []const u8, scratch: []u8) !std.ArrayList(u8) {
+    var c = Collector{};
+    try csv.simd.forEachField(input, scratch, .{}, &c, Collector.on);
+    try testing.expect(!c.fail);
+    return c.out;
+}
+
+/// Parallel parse with `n` workers; returns the concatenated sink output.
+fn parallelOf(io: std.Io, input: []const u8, n: usize) !std.ArrayList(u8) {
+    var cols: [16]Collector = @splat(.{});
+    var ptrs: [16]*Collector = undefined;
+    var bufs: [16][1024]u8 = undefined;
+    var scratches: [16][]u8 = undefined;
+    for (0..n) |i| {
+        ptrs[i] = &cols[i];
+        scratches[i] = &bufs[i];
+    }
+    defer for (cols[0..n]) |*c| c.out.deinit(testing.allocator);
+    try csv.parallel.forEachField(io, input, .{}, scratches[0..n], ptrs[0..n], Collector.on);
+    var all: std.ArrayList(u8) = .empty;
+    for (cols[0..n]) |*c| {
+        try testing.expect(!c.fail);
+        try all.appendSlice(testing.allocator, c.out.items);
+    }
+    return all;
+}
+
+fn expectParallelMatchesSerial(io: std.Io, input: []const u8) !void {
+    var scratch: [1024]u8 = undefined;
+    var want = try serialOf(input, &scratch);
+    defer want.deinit(testing.allocator);
+    for (1..17) |n| {
+        var got = try parallelOf(io, input, n);
+        defer got.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, want.items, got.items);
+    }
+}
+
+test "parallel: forEachField output equals serial for N = 1..16 (testing io)" {
+    const alloc = testing.allocator;
+    for (200..230) |seed| {
+        const input = try genCsv(alloc, seed, 40 + (seed % 7) * 30);
+        defer alloc.free(input);
+        try expectParallelMatchesSerial(testing.io, input);
+    }
+}
+
+test "parallel: forEachField output equals serial on a real thread pool" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for (300..316) |seed| {
+        const input = try genCsv(alloc, seed, 400);
+        defer alloc.free(input);
+        try expectParallelMatchesSerial(io, input);
+    }
+    try expectParallelMatchesSerial(io, "");
+    try expectParallelMatchesSerial(io, "only,one,record");
+}
+
+fn parallelErr(io: std.Io, input: []const u8, n: usize) ?anyerror {
+    var got = parallelOf(io, input, n) catch |e| return e;
+    got.deinit(testing.allocator);
+    return null;
+}
+
+fn serialErr(input: []const u8) ?anyerror {
+    var scratch: [1024]u8 = undefined;
+    var c = Collector{};
+    defer c.out.deinit(testing.allocator);
+    csv.simd.forEachField(input, &scratch, .{}, &c, Collector.on) catch |e| return e;
+    return null;
+}
+
+test "parallel: invalid quoting reports the same error as the serial parse" {
+    const alloc = testing.allocator;
+    const fixed = [_][]const u8{
+        "id,item,v\n1,3\" pipe,1.5\n2,plain,2.5\n3,other,3.5\n",
+        "a,b\n\"x\"y,1\n",
+        "a,b\n1,\"open\n2,x\n",
+        "a\n\"a\"b\"c\"\n",
+        "id,x\n1,3\" pipe\n2,\"q\"\n3,z\n",
+    };
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    for (fixed) |input| {
+        const want = serialErr(input) orelse return error.TestExpectedError;
+        for (1..9) |n| try testing.expectEqual(want, parallelErr(threaded.io(), input, n).?);
+    }
+    // A stray quote injected at random positions of random valid inputs.
+    var prng = std.Random.DefaultPrng.init(7);
+    for (400..430) |seed| {
+        const input = try genCsv(alloc, seed, 120);
+        defer alloc.free(input);
+        if (input.len == 0) continue;
+        input[prng.random().uintLessThan(usize, input.len)] = '"';
+        const want = serialErr(input);
+        for ([_]usize{ 2, 3, 5, 8, 16 }) |n| try testing.expectEqual(want, parallelErr(threaded.io(), input, n));
+    }
+}
+
+test "parallel: worker-count errors are real errors" {
+    var c = Collector{};
+    var ptrs = [_]*Collector{ &c, &c };
+    var buf: [8]u8 = undefined;
+    const one = [_][]u8{&buf};
+    try testing.expectError(csv.Error.BadWorkerCount, csv.parallel.forEachField(testing.io, "a\n", .{}, &one, &ptrs, Collector.on));
+    try testing.expectError(csv.Error.BadWorkerCount, csv.parallel.forEachField(testing.io, "a\n", .{}, one[0..0], ptrs[0..0], Collector.on));
+}

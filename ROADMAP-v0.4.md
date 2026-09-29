@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0–M2 done (2026-09-29); M3 next.** v0.3.1 is the current release. This page is the plan for
+**Status: M0–M3 done (2026-09-29); M4 next.** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -102,6 +102,18 @@ code.
   is odd fails with `UnterminatedQuote`.
 
 ### M3 — Parallel push API
+
+> ✅ **Done 2026-09-29.** `zsift.parallel.forEachField(io, input, opts, scratches, sinks,
+> onField)`: quote counts, record starts and range parses each run as one `Io.Group`
+> task per worker; bookkeeping on the stack (≤ 256 workers, `BadWorkerCount` beyond).
+> Concatenated sink output equals the serial output for N = 1…16 over 46 random inputs,
+> under `std.testing.io` and a real `Io.Threaded` pool; invalid quoting returns the
+> serial error (fixed cases + random stray quotes). `verify` runs it as a fifth path
+> (N = CPUs, 2, 3, 4, 16, 64): adversarial 27/27, private 7/7. Speed vs serial push,
+> 12 workers: **2.6–3.4×** on 18–45 MB files (5–6.8 GB/s); 0.6–1.2× on ≤ 1.7 MB files,
+> where task start-up dominates (M4's threshold). Found on the way: sinks packed side by
+> side (false sharing) made par *slower* than serial; the API doc now says to keep each
+> sink on its own cache line.
 - `zsift.parallel.forEachField(io, input, opts, scratches, sinks)`: one sink and one
   scratch buffer per worker, provided by the caller, so zsift still never allocates.
   Concurrency comes from the caller's `std.Io` (`Io.Group.concurrent`), so the worker

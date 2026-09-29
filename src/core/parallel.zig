@@ -15,9 +15,9 @@
 //!      `recordStartAfter` scans forward from each cut, independently, to the first
 //!      record start.
 //!
-//! `splitRecords` runs both phases serially; a parallel driver runs the same functions
-//! on several workers. Invalid quoting is not detected here: the parser that consumes
-//! each range reports it (`classify.quoteViolation`).
+//! `splitRecords` runs both phases serially; `forEachField` runs them, and then the
+//! parse of each range, on the caller's `std.Io` (one task per worker). Invalid quoting
+//! is reported by the parser that consumes each range (`classify.quoteViolation`).
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -98,4 +98,82 @@ pub fn splitRecords(input: []const u8, opts: Options, bounds: []usize) Error!voi
 /// Byte offset of raw cut `i` of `n` (before snapping to a record start).
 pub fn rawCut(len: usize, n: usize, i: usize) usize {
     return @intCast(@as(u128, len) * i / n);
+}
+
+/// Most workers `forEachField` accepts (its bookkeeping lives on the stack).
+pub const max_workers = 256;
+
+/// Parallel push parse: split `input` into `ctxs.len` ranges at record starts and run
+/// `simd.forEachField` over each on the caller's `io`, one task per range. Range `i`'s
+/// fields go, in order, to `onField(ctxs[i], …)` with `scratches[i]` for unescaping, so
+/// concatenating the sinks' output in index order is exactly the serial field
+/// sequence. Workers run concurrently only if `io` provides concurrency (e.g.
+/// `std.Io.Threaded`); zsift itself starts no threads and allocates nothing.
+///
+/// Keep each sink on its own cache line (`align(std.atomic.cache_line)`): workers write
+/// their sinks on every field, and sinks packed side by side made the parallel path
+/// slower than the serial one in measurement (false sharing).
+///
+/// On error, the error of the earliest range that failed is returned — the same error
+/// a serial parse reports, since every range before the first defect is cut exactly.
+/// Sinks may already hold fields from any range when an error is returned.
+pub fn forEachField(
+    io: std.Io,
+    input: []const u8,
+    opts: Options,
+    scratches: []const []u8,
+    ctxs: anytype,
+    comptime onField: fn (std.meta.Elem(@TypeOf(ctxs)), bytes: []const u8, last_in_record: bool) void,
+) (Error || std.Io.Cancelable)!void {
+    try opts.validate();
+    const n = ctxs.len;
+    if (n == 0 or n > max_workers or scratches.len != n) return Error.BadWorkerCount;
+    if (n == 1) return simd.forEachField(input, scratches[0], opts, ctxs[0], onField);
+
+    const Ctx = std.meta.Elem(@TypeOf(ctxs));
+    const Task = struct {
+        fn count(out: *u64, bytes: []const u8, quote: u8) void {
+            out.* = countQuotes(bytes, quote);
+        }
+        fn start(out: *usize, text: []const u8, from: usize, in_quote: bool, o: Options) void {
+            out.* = recordStartAfter(text, from, in_quote, o);
+        }
+        fn parse(out: *?Error, bytes: []const u8, scratch: []u8, o: Options, ctx: Ctx) void {
+            simd.forEachField(bytes, scratch, o, ctx, onField) catch |e| {
+                out.* = e;
+            };
+        }
+    };
+
+    // Phase 1: quote count of each raw range.
+    var counts: [max_workers]u64 = undefined;
+    {
+        var g: std.Io.Group = .init;
+        for (0..n) |i| g.async(io, Task.count, .{ &counts[i], input[rawCut(input.len, n, i)..rawCut(input.len, n, i + 1)], opts.quote });
+        try g.await(io);
+    }
+    // Phase 2: prefix parity at each cut, then the record start after it. An odd total
+    // is not returned here: the range holding the open quote reports it, so an earlier
+    // defect keeps its place in the error order.
+    var bounds: [max_workers + 1]usize = undefined;
+    {
+        var g: std.Io.Group = .init;
+        var quotes_before: u64 = 0;
+        bounds[0] = 0;
+        for (1..n) |i| {
+            quotes_before += counts[i - 1];
+            g.async(io, Task.start, .{ &bounds[i], input, rawCut(input.len, n, i), quotes_before % 2 == 1, opts });
+        }
+        try g.await(io);
+        for (1..n) |i| bounds[i] = @max(bounds[i], bounds[i - 1]);
+        bounds[n] = input.len;
+    }
+    // Phase 3: parse every range.
+    var errs: [max_workers]?Error = @splat(null);
+    {
+        var g: std.Io.Group = .init;
+        for (0..n) |i| g.async(io, Task.parse, .{ &errs[i], input[bounds[i]..bounds[i + 1]], scratches[i], opts, ctxs[i] });
+        try g.await(io);
+    }
+    for (errs[0..n]) |e| if (e) |err| return err;
 }

@@ -6,10 +6,11 @@
 //!   bench verify [--out PATH] [file-or-dir ...]
 //!
 //! Each file goes through scalar `Parser` (the oracle), `SimdParser` (pull),
-//! `forEachField` (push) and `streamReader` (64 KiB window). A path's outcome is its
+//! `forEachField` (push), `streamReader` (64 KiB window) and `parallel.forEachField`
+//! (par, one worker per CPU; plus 2, 3, 4, 16 and 64 workers). A path's outcome is its
 //! field sequence digest or the name of the error it returned. A file PASSES when its
-//! expectation holds: `agree` (all four outcomes identical) unless an EXPECT.tsv beside it
-//! says `strict_error` (pull, push and stream each return an error). With no paths,
+//! expectation holds: `agree` (all outcomes identical) unless an EXPECT.tsv beside it
+//! says `strict_error` (every strict path returns an error). With no paths,
 //! `$ZSIFT_TESTDATA` is used; if that is unset too, it says SKIPPED and checks nothing.
 //! The report is rewritten after every file, so an interrupted run keeps its results.
 //! Exit status: 0 all pass (or skipped), 1 any FAIL.
@@ -61,8 +62,8 @@ const Digest = struct {
     }
 };
 
-pub const Path = enum { scalar, pull, push, stream };
-const path_names = [_][]const u8{ "scalar", "pull", "push", "stream" };
+pub const Path = enum { scalar, pull, push, stream, par };
+const path_names = [_][]const u8{ "scalar", "pull", "push", "stream", "par" };
 
 fn runPull(comptime P: type, text: []const u8, scratch: []u8) Outcome {
     var d = Digest{};
@@ -90,7 +91,7 @@ fn runStream(comptime C: type, text: []const u8, window: []u8, scratch: []u8) Ou
 /// One path's outcome over `text` using zsift module `C` (the current `csv`, or the
 /// `-Dbaseline` one), with buffers of its own (for `bench compare`). Single-threaded
 /// use only: the buffers are static.
-pub fn outcome(comptime C: type, p: Path, text: []const u8) Outcome {
+pub fn outcome(comptime C: type, io: Io, p: Path, text: []const u8) Outcome {
     const B = struct {
         var scratch: [1 << 20]u8 = undefined;
         var window: [window_len]u8 = undefined;
@@ -101,29 +102,79 @@ pub fn outcome(comptime C: type, p: Path, text: []const u8) Outcome {
         .pull => runPull(C.SimdParser, text, &B.scratch),
         .push => runPush(C, text, &B.scratch),
         .stream => runStream(C, text, &B.window, &B.stream_scratch),
+        .par => runPar(C, io, text, workers()),
     };
 }
 
 pub const Verdict = struct { pass: bool, why: []const u8 };
 
-/// Split check: for several worker counts, `parallel.splitRecords` then the push path
-/// over each range in order must reproduce the whole-file push digest. Returns the
-/// first worker count that does not, or null when all do.
-fn splitMismatch(text: []const u8, want: Outcome, scratch: []u8) ?usize {
-    const cpus = std.Thread.getCpuCount() catch 4;
-    for ([_]usize{ 2, 3, 4, cpus, 16, max_split }) |n| {
-        var bounds: [max_split + 1]usize = undefined;
-        csv.parallel.splitRecords(text, .{}, bounds[0 .. n + 1]) catch return n;
-        var d = Digest{};
-        for (bounds[0..n], bounds[1 .. n + 1]) |a, b| {
-            csv.simd.forEachField(text[a..b], scratch, .{}, &d, Digest.on) catch return n;
+/// Collects one worker's fields, serialized (u32 length, bytes, record-end flag), so the
+/// workers' output can be replayed in range order into one `Digest`.
+const ParSink = struct {
+    out: std.ArrayList(u8) = .empty,
+    oom: bool = false,
+
+    fn on(self: *ParSink, bytes: []const u8, last: bool) void {
+        const len: u32 = @intCast(bytes.len);
+        self.out.appendSlice(std.heap.smp_allocator, std.mem.asBytes(&len)) catch {
+            self.oom = true;
+        };
+        self.out.appendSlice(std.heap.smp_allocator, bytes) catch {
+            self.oom = true;
+        };
+        self.out.append(std.heap.smp_allocator, @intFromBool(last)) catch {
+            self.oom = true;
+        };
+    }
+};
+
+/// `parallel.forEachField` with `n` workers, its sinks replayed in order into a Digest.
+fn runPar(comptime C: type, io: Io, text: []const u8, n: usize) Outcome {
+    if (!@hasDecl(C, "parallel")) return .{ .err = "NoParallelInThisZsift" };
+    const gpa = std.heap.smp_allocator;
+    const sinks = gpa.alloc(ParSink, n) catch return .{ .err = "OutOfMemory" };
+    defer gpa.free(sinks);
+    const ptrs = gpa.alloc(*ParSink, n) catch return .{ .err = "OutOfMemory" };
+    defer gpa.free(ptrs);
+    const scratches = gpa.alloc([]u8, n) catch return .{ .err = "OutOfMemory" };
+    defer gpa.free(scratches);
+    const bufs = gpa.alloc(u8, n * window_len) catch return .{ .err = "OutOfMemory" };
+    defer gpa.free(bufs);
+    for (sinks, ptrs, scratches, 0..) |*s, *p, *sc, i| {
+        s.* = .{};
+        p.* = s;
+        sc.* = bufs[i * window_len ..][0..window_len];
+    }
+    defer for (sinks) |*s| s.out.deinit(gpa);
+    C.parallel.forEachField(io, text, .{}, scratches, ptrs, ParSink.on) catch |e| return .{ .err = @errorName(e) };
+    var d = Digest{};
+    for (sinks) |*s| {
+        if (s.oom) return .{ .err = "OutOfMemory" };
+        var i: usize = 0;
+        while (i < s.out.items.len) {
+            const len = std.mem.readInt(u32, s.out.items[i..][0..4], .native);
+            const bytes = s.out.items[i + 4 ..][0..len];
+            d.on(bytes, s.out.items[i + 4 + len] == 1);
+            i += 5 + len;
         }
-        if (!d.done().eql(want)) return n;
+    }
+    return d.done();
+}
+
+fn workers() usize {
+    return @min(std.Thread.getCpuCount() catch 4, csv.parallel.max_workers);
+}
+
+/// Parallel check at several worker counts beyond the default: each must reproduce
+/// `want` (the serial push outcome). Returns the first count that does not.
+fn parMismatch(io: Io, text: []const u8, want: Outcome) ?usize {
+    for ([_]usize{ 2, 3, 4, 16, max_split }) |n| {
+        if (!runPar(csv, io, text, n).eql(want)) return n;
     }
     return null;
 }
 
-fn judge(expect: cases.Expect, o: [4]Outcome) Verdict {
+fn judge(expect: cases.Expect, o: [5]Outcome) Verdict {
     switch (expect) {
         .agree => {
             for (o[1..], 1..) |x, i| if (!x.eql(o[0])) return .{ .pass = false, .why = path_names[i] };
@@ -228,20 +279,21 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
         for (try listCsv(io, alloc, root)) |file| {
             const text = try Io.Dir.cwd().readFileAlloc(io, file, alloc, .unlimited);
             const expect = try expectFor(io, alloc, file);
-            const o = [4]Outcome{
+            const o = [5]Outcome{
                 runPull(csv.Parser, text, scratch),
                 runPull(csv.SimdParser, text, scratch),
                 runPush(csv, text, scratch),
                 runStream(csv, text, window, stream_scratch),
+                runPar(csv, io, text, workers()),
             };
             var v = judge(expect, o);
             // Whole-file agreement is a precondition for the split check to mean anything.
-            const split_bad: ?usize = if (expect == .agree and o[2].err == null) splitMismatch(text, o[2], scratch) else null;
-            if (v.pass and split_bad != null) v = .{ .pass = false, .why = "split" };
+            const split_bad: ?usize = if (expect == .agree and o[2].err == null) parMismatch(io, text, o[2]) else null;
+            if (v.pass and split_bad != null) v = .{ .pass = false, .why = "par" };
             if (!v.pass) n_fail += 1;
             print("{s:<5} {s:<12} {s}", .{ if (v.pass) "PASS" else "FAIL", @tagName(expect), file });
             if (!v.pass) print("   ({s} differs)", .{v.why});
-            if (split_bad) |n| print("   (split into {d} ranges does not reproduce the file)", .{n});
+            if (split_bad) |n| print("   (parallel with {d} workers does not reproduce the file)", .{n});
             print("\n", .{});
             if (!v.pass) for (o, path_names) |x, name| {
                 if (x.err) |e| print("        {s:<7} error {s}\n", .{ name, e }) else print("        {s:<7} {d} records, {d} fields, digest {x:0>16}\n", .{ name, x.records, x.fields, x.digest });

@@ -101,6 +101,7 @@ The in-memory parsers are zero-allocation and share `Options` / `Field` / `Error
 | Streaming | `zsift.streamReader` | `*std.Io.Reader` | RFC-4180 strict | bounded memory, push callback |
 | Auto | `zsift.parseReader` | `*std.Io.Reader` | RFC-4180 strict | picks slurp vs stream by size |
 | Typed rows | `zsift.reader(T)` | slice | RFC-4180 strict | opt-in struct deserialize over `SimdParser` (see [Typed layers](#typed-layers)) |
+| Multi-core, push | `zsift.parallel.forEachField` | slice | RFC-4180 strict | one sink + scratch per worker on the caller's `std.Io`; sinks concatenated in order = the serial output (v0.4) |
 
 ```zig
 const zsift = @import("zsift");
