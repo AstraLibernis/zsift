@@ -72,6 +72,8 @@ fn ReaderCap(comptime T: type, comptime max_cols: usize) type {
 
         const Self = @This();
         pub const field_count = N;
+        /// The row type (for `parallel.forEachRow`).
+        pub const Row = T;
 
         pub fn init(input: []const u8, scratch: []u8, opts: Options) CoreError!Self {
             var self: Self = .{

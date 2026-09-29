@@ -102,6 +102,8 @@ The in-memory parsers are zero-allocation and share `Options` / `Field` / `Error
 | Auto | `zsift.parseReader` | `*std.Io.Reader` | RFC-4180 strict | picks slurp vs stream by size |
 | Typed rows | `zsift.reader(T)` | slice | RFC-4180 strict | opt-in struct deserialize over `SimdParser` (see [Typed layers](#typed-layers)) |
 | Multi-core, push | `zsift.parallel.forEachField` | slice | RFC-4180 strict | one sink + scratch per worker on the caller's `std.Io`; sinks concatenated in order = the serial output; worker count chosen by size (serial below 2 MiB; `forEachFieldExact` to force it) (v0.4) |
+| Multi-core, typed | `zsift.parallel.forEachRow(R, …)` | slice | RFC-4180 strict | `R` = `reader(T)` / `readerWide(T, n)`; header read once, its column map shared by every worker (v0.4) |
+| Multi-core, records | `zsift.parallel.forEachRecord` | slice | RFC-4180 strict | a `Record` per record; `parallel.splitHeader` captures a `Header` once for `get(name)` (v0.4) |
 | Multi-core, auto | `zsift.parallel.parseReader` | `*std.Io.Reader` | RFC-4180 strict | loads known-size input (≤ 1 GiB) and parses it multi-core; unknown size streams serially (v0.4) |
 
 ```zig

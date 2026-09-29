@@ -108,12 +108,6 @@ pub fn forEachFieldExact(
 
     const Ctx = std.meta.Elem(@TypeOf(ctxs));
     const Task = struct {
-        fn count(out: *u64, bytes: []const u8, quote: u8) void {
-            out.* = countQuotes(bytes, quote);
-        }
-        fn start(out: *usize, text: []const u8, from: usize, in_quote: bool, o: Options) void {
-            out.* = recordStartAfter(text, from, in_quote, o);
-        }
         fn parse(out: *?Error, bytes: []const u8, scratch: []u8, o: Options, ctx: Ctx) void {
             simd.forEachField(bytes, scratch, o, ctx, onField) catch |e| {
                 out.* = e;
@@ -121,28 +115,8 @@ pub fn forEachFieldExact(
         }
     };
 
-    // Phase 1: quote count of each raw range.
-    var counts: [max_workers]u64 = undefined;
-    {
-        var g: std.Io.Group = .init;
-        for (0..n) |i| g.async(io, Task.count, .{ &counts[i], input[rawCut(input.len, n, i)..rawCut(input.len, n, i + 1)], opts.quote });
-        try g.await(io);
-    }
-    // Phase 2: prefix parity per cut, then its record start. An odd total is left to the
-    // range holding the open quote, so an earlier defect keeps its place in error order.
     var bounds: [max_workers + 1]usize = undefined;
-    {
-        var g: std.Io.Group = .init;
-        var quotes_before: u64 = 0;
-        bounds[0] = 0;
-        for (1..n) |i| {
-            quotes_before += counts[i - 1];
-            g.async(io, Task.start, .{ &bounds[i], input, rawCut(input.len, n, i), quotes_before % 2 == 1, opts });
-        }
-        try g.await(io);
-        for (1..n) |i| bounds[i] = @max(bounds[i], bounds[i - 1]);
-        bounds[n] = input.len;
-    }
+    try splitParallel(io, input, opts, n, &bounds);
     // Phase 3: parse every range.
     var errs: [max_workers]?Error = @splat(null);
     {
@@ -151,6 +125,36 @@ pub fn forEachFieldExact(
         try g.await(io);
     }
     for (errs[0..n]) |e| if (e) |err| return err;
+}
+
+/// Phases 1 and 2 on `io`: `bounds[0..n + 1]` = record-aligned range starts.
+fn splitParallel(io: std.Io, input: []const u8, opts: Options, n: usize, bounds: *[max_workers + 1]usize) std.Io.Cancelable!void {
+    const Task = struct {
+        fn count(out: *u64, bytes: []const u8, quote: u8) void {
+            out.* = countQuotes(bytes, quote);
+        }
+        fn start(out: *usize, text: []const u8, from: usize, in_quote: bool, o: Options) void {
+            out.* = recordStartAfter(text, from, in_quote, o);
+        }
+    };
+    var counts: [max_workers]u64 = undefined;
+    {
+        var g: std.Io.Group = .init;
+        for (0..n) |i| g.async(io, Task.count, .{ &counts[i], input[rawCut(input.len, n, i)..rawCut(input.len, n, i + 1)], opts.quote });
+        try g.await(io);
+    }
+    // Prefix parity per cut, then its record start. An odd total is left to the range
+    // holding the open quote, so an earlier defect keeps its place in error order.
+    var g: std.Io.Group = .init;
+    var quotes_before: u64 = 0;
+    bounds[0] = 0;
+    for (1..n) |i| {
+        quotes_before += counts[i - 1];
+        g.async(io, Task.start, .{ &bounds[i], input, rawCut(input.len, n, i), quotes_before % 2 == 1, opts });
+    }
+    try g.await(io);
+    for (1..n) |i| bounds[i] = @max(bounds[i], bounds[i - 1]);
+    bounds[n] = input.len;
 }
 
 /// `forEachFieldExact` on as many of the given workers as the input keeps busy
@@ -217,4 +221,111 @@ pub fn parseReader(
         .streaming => try stream.streamReader(r, scratches[0], ro.csv, ctxs[0], onField),
     }
     return strategy;
+}
+
+const reader_mod = @import("reader.zig");
+const Header = @import("header.zig").Header;
+const Record = @import("record.zig").Record;
+
+/// Capture the first record of `input` as a `Header` (names in `slots`, escaped names
+/// unescaped into `scratch`, which must outlive the header) and return it with the rest
+/// of the input, which starts at a record start: pass `data` to `forEachRecord`.
+pub fn splitHeader(input: []const u8, opts: Options, slots: [][]const u8, scratch: []u8) Error!struct { header: Header, data: []const u8 } {
+    var p = try simd.SimdParser.init(input, scratch, opts);
+    const rec = (try p.nextRecord(slots)) orelse return .{ .header = Header.init(slots[0..0]), .data = input[input.len..] };
+    return .{ .header = Header.init(rec), .data = input[@min(p.field_start, input.len)..] };
+}
+
+/// Parallel records: each record of `data` reaches `onRecord(ctxs[i], rec)` as a
+/// `Record` view (with `header` attached for `get(name)` when given), at most
+/// `max_cols` fields per record. Worker count by size, ordering and errors as
+/// `forEachField`. The record borrows its range and is valid only during the call.
+pub fn forEachRecord(
+    io: std.Io,
+    data: []const u8,
+    opts: Options,
+    header: ?*const Header,
+    comptime max_cols: usize,
+    scratches: []const []u8,
+    ctxs: anytype,
+    comptime onRecord: fn (std.meta.Elem(@TypeOf(ctxs)), rec: Record) void,
+) (Error || std.Io.Cancelable)!void {
+    try opts.validate();
+    if (ctxs.len == 0 or ctxs.len > max_workers or scratches.len != ctxs.len) return Error.BadWorkerCount;
+    const n = workersFor(data.len, ctxs.len);
+    const Ctx = std.meta.Elem(@TypeOf(ctxs));
+    const Task = struct {
+        fn run(out: *?Error, bytes: []const u8, scratch: []u8, o: Options, h: ?*const Header, ctx: Ctx) void {
+            var p = simd.SimdParser.init(bytes, scratch, o) catch |e| {
+                out.* = e;
+                return;
+            };
+            var row: [max_cols][]const u8 = undefined;
+            while (p.nextRecord(&row) catch |e| {
+                out.* = e;
+                return;
+            }) |fields| onRecord(ctx, if (h) |hh| Record.withHeader(fields, hh) else Record.init(fields));
+        }
+    };
+    var bounds: [max_workers + 1]usize = undefined;
+    if (n > 1) try splitParallel(io, data, opts, n, &bounds) else {
+        bounds[0] = 0;
+        bounds[1] = data.len;
+    }
+    var errs: [max_workers]?Error = @splat(null);
+    var g: std.Io.Group = .init;
+    for (0..n) |i| g.async(io, Task.run, .{ &errs[i], data[bounds[i]..bounds[i + 1]], scratches[i], opts, header, ctxs[i] });
+    try g.await(io);
+    for (errs[0..n]) |e| if (e) |err| return err;
+}
+
+/// Parallel typed rows: `R` is `zsift.reader(T)` or `zsift.readerWide(T, n)`; every
+/// record becomes an `R.Row` passed to `onRow(ctxs[i], row)`. With `header`, the first
+/// record is read once, serially, to map struct fields to columns by name (as
+/// `withHeader`), and that mapping is shared by every worker. Worker count by size,
+/// ordering and errors as `forEachField`; `[]const u8` row fields borrow the input.
+pub fn forEachRow(
+    comptime R: type,
+    io: std.Io,
+    input: []const u8,
+    opts: Options,
+    header: bool,
+    scratches: []const []u8,
+    ctxs: anytype,
+    comptime onRow: fn (std.meta.Elem(@TypeOf(ctxs)), row: R.Row) void,
+) (reader_mod.ReaderError || std.Io.Cancelable)!void {
+    try opts.validate();
+    if (ctxs.len == 0 or ctxs.len > max_workers or scratches.len != ctxs.len) return Error.BadWorkerCount;
+    var head = try R.init(input, scratches[0], opts);
+    var data = input;
+    if (header) {
+        try head.withHeader();
+        data = input[@min(head.parser.field_start, input.len)..];
+    }
+    const perm = head.perm;
+    const n = workersFor(data.len, ctxs.len);
+    const Ctx = std.meta.Elem(@TypeOf(ctxs));
+    const Task = struct {
+        fn run(out: *?reader_mod.ReaderError, bytes: []const u8, scratch: []u8, o: Options, p: @TypeOf(perm), ctx: Ctx) void {
+            var r = R.init(bytes, scratch, o) catch |e| {
+                out.* = e;
+                return;
+            };
+            r.perm = p;
+            while (r.next() catch |e| {
+                out.* = e;
+                return;
+            }) |row| onRow(ctx, row);
+        }
+    };
+    var bounds: [max_workers + 1]usize = undefined;
+    if (n > 1) try splitParallel(io, data, opts, n, &bounds) else {
+        bounds[0] = 0;
+        bounds[1] = data.len;
+    }
+    var errs: [max_workers]?reader_mod.ReaderError = @splat(null);
+    var g: std.Io.Group = .init;
+    for (0..n) |i| g.async(io, Task.run, .{ &errs[i], data[bounds[i]..bounds[i + 1]], scratches[i], opts, perm, ctxs[i] });
+    try g.await(io);
+    for (errs[0..n]) |e| if (e) |err| return err;
 }

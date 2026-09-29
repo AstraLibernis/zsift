@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0–M4 done (2026-09-29); M5 next.** v0.3.1 is the current release. This page is the plan for
+**Status: M0–M5 done (2026-09-29); M6 next (in the zarbor repo).** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -144,6 +144,16 @@ code.
   serial on the corpus (alternating comparison).
 
 ### M5 — Typed layers in parallel
+
+> ✅ **Done 2026-09-29.** `parallel.forEachRow(R, …)` (`R` = `reader(T)` or
+> `readerWide(T, n)`): with `header`, the first record is read once, serially, and its
+> struct-field→column map is shared by every worker. `parallel.forEachRecord` gives a
+> `Record` per record; `parallel.splitHeader` captures a `Header` once so `get(name)`
+> works in every worker. Both share the split and size-based worker count. Tests over a
+> 2.9 MB input (reordered header, an extra column, quoted names with commas, newlines
+> and escapes, optional fields): rows and records equal the serial `reader(T)` /
+> record loop for 1, 2, 5 and 12 workers, and a bad bool early plus a bad int late
+> returns the serial reader's error (the bool). 96 tests.
 - `reader(T)` and `Record` per range, with the `Header` captured once from range 0.
 - **Done when:** typed rows equal the serial `reader(T)` rows on the corpus.
 

@@ -316,3 +316,174 @@ test "parallel: workersFor is serial below the threshold and capped by the worke
     try testing.expectEqual(@as(usize, 12), p.workersFor(1 << 30, 12));
     try testing.expectEqual(@as(usize, 3), p.workersFor(1 << 30, 3));
 }
+
+// ---------------------------------------------------------------------------
+// Typed layers in parallel: forEachRow / forEachRecord == their serial forms
+// ---------------------------------------------------------------------------
+
+const Row = struct { id: i64, price: f64, flag: bool, name: []const u8, note: ?[]const u8 };
+const WideReader = csv.readerWide(Row, 8);
+
+/// Header in a different order than `Row`, plus a column `Row` doesn't name; names are
+/// quoted with delimiters, newlines and escaped quotes; `note` is sometimes empty.
+fn genTyped(alloc: std.mem.Allocator, rows: usize) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(77);
+    const r = prng.random();
+    var b: std.ArrayList(u8) = .empty;
+    try b.appendSlice(alloc, "note,id,name,extra,flag,price\n");
+    var buf: [128]u8 = undefined;
+    for (0..rows) |i| {
+        const note = if (r.boolean()) "" else "n";
+        const names = [_][]const u8{ "plain", "\"a,b\"", "\"two\nlines\"", "\"say \"\"hi\"\"\"", "\"\"" };
+        try b.appendSlice(alloc, try std.fmt.bufPrint(&buf, "{s},{d},{s},x,{s},{d:.2}\n", .{
+            note, i, names[r.uintLessThan(usize, names.len)], if (r.boolean()) "true" else "false", r.float(f64) * 100,
+        }));
+    }
+    return b.toOwnedSlice(alloc);
+}
+
+const RowSink = struct {
+    out: std.ArrayList(u8) = .empty,
+    fail: bool = false,
+    fn on(self: *RowSink, row: Row) void {
+        var buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{d}|{d}|{}|{s}|{s}\n", .{ row.id, row.price, row.flag, row.name, row.note orelse "<null>" }) catch {
+            self.fail = true;
+            return;
+        };
+        self.out.appendSlice(testing.allocator, line) catch {
+            self.fail = true;
+        };
+    }
+};
+
+fn serialRows(input: []const u8) !std.ArrayList(u8) {
+    var scratch: [1024]u8 = undefined;
+    var rd = try WideReader.init(input, &scratch, .{});
+    try rd.withHeader();
+    var s = RowSink{};
+    while (try rd.next()) |row| s.on(row);
+    try testing.expect(!s.fail);
+    return s.out;
+}
+
+fn parallelRows(io: std.Io, input: []const u8, n: usize) !std.ArrayList(u8) {
+    var sinks: [12]RowSink = @splat(.{});
+    var ptrs: [12]*RowSink = undefined;
+    var bufs: [12][1024]u8 = undefined;
+    var scratches: [12][]u8 = undefined;
+    for (0..n) |i| {
+        ptrs[i] = &sinks[i];
+        scratches[i] = &bufs[i];
+    }
+    defer for (sinks[0..n]) |*s| s.out.deinit(testing.allocator);
+    try csv.parallel.forEachRow(WideReader, io, input, .{}, true, scratches[0..n], ptrs[0..n], RowSink.on);
+    var all: std.ArrayList(u8) = .empty;
+    var used: usize = 0;
+    for (sinks[0..n]) |*s| {
+        try testing.expect(!s.fail);
+        used += @intFromBool(s.out.items.len > 0);
+        try all.appendSlice(testing.allocator, s.out.items);
+    }
+    if (n > 1) try testing.expect(used > 1); // the input is large enough to go parallel
+    return all;
+}
+
+test "parallel: forEachRow with a header equals the serial reader(T)" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const input = try genTyped(alloc, 90_000);
+    defer alloc.free(input);
+    try testing.expect(input.len >= csv.parallel.min_parallel_bytes);
+    var want = try serialRows(input);
+    defer want.deinit(testing.allocator);
+    for ([_]usize{ 1, 2, 5, 12 }) |n| {
+        var got = try parallelRows(threaded.io(), input, n);
+        defer got.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, want.items, got.items);
+    }
+}
+
+test "parallel: forEachRow reports the serial reader's error" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const input = try genTyped(alloc, 90_000);
+    defer alloc.free(input);
+    // A bad bool early and a bad int late: the serial reader stops at the bool.
+    const early = std.mem.find(u8, input[input.len / 5 ..], ",true,").? + input.len / 5;
+    @memcpy(input[early + 1 ..][0..4], "tru?");
+    const late_line = std.mem.findScalarPos(u8, input, input.len * 4 / 5, '\n').? + 1;
+    input[late_line + std.mem.findScalar(u8, input[late_line..], ',').? + 1] = 'X';
+    var scratch: [1024]u8 = undefined;
+    var rd = try WideReader.init(input, &scratch, .{});
+    try rd.withHeader();
+    const want: anyerror = while (true) {
+        _ = (rd.next() catch |e| break e) orelse return error.TestExpectedError;
+    };
+    for ([_]usize{ 2, 5, 12 }) |n| try testing.expectError(want, parallelRows(threaded.io(), input, n));
+}
+
+const RecSink = struct {
+    out: std.ArrayList(u8) = .empty,
+    fail: bool = false,
+    fn on(self: *RecSink, rec: csv.Record) void {
+        const id = rec.get("id") orelse {
+            self.fail = true;
+            return;
+        };
+        const name = rec.get("name").?;
+        self.out.appendSlice(testing.allocator, id.bytes) catch {
+            self.fail = true;
+        };
+        self.out.append(testing.allocator, '=') catch {
+            self.fail = true;
+        };
+        self.out.appendSlice(testing.allocator, name.bytes) catch {
+            self.fail = true;
+        };
+        self.out.append(testing.allocator, '\n') catch {
+            self.fail = true;
+        };
+    }
+};
+
+test "parallel: forEachRecord with a captured header equals the serial record loop" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const input = try genTyped(alloc, 90_000);
+    defer alloc.free(input);
+
+    var slots: [8][]const u8 = undefined;
+    var hscratch: [256]u8 = undefined;
+    const split = try csv.parallel.splitHeader(input, .{}, &slots, &hscratch);
+
+    var want = RecSink{};
+    defer want.out.deinit(testing.allocator);
+    {
+        var scratch: [1024]u8 = undefined;
+        var p = try csv.SimdParser.init(split.data, &scratch, .{});
+        var row: [8][]const u8 = undefined;
+        while (try p.nextRecord(&row)) |f| want.on(csv.Record.withHeader(f, &split.header));
+    }
+    var sinks: [12]RecSink = @splat(.{});
+    var ptrs: [12]*RecSink = undefined;
+    var bufs: [12][1024]u8 = undefined;
+    var scratches: [12][]u8 = undefined;
+    for (0..12) |i| {
+        ptrs[i] = &sinks[i];
+        scratches[i] = &bufs[i];
+    }
+    defer for (&sinks) |*s| s.out.deinit(testing.allocator);
+    try csv.parallel.forEachRecord(threaded.io(), split.data, .{}, &split.header, 8, &scratches, &ptrs, RecSink.on);
+    var all: std.ArrayList(u8) = .empty;
+    defer all.deinit(testing.allocator);
+    for (&sinks) |*s| {
+        try testing.expect(!s.fail);
+        try all.appendSlice(testing.allocator, s.out.items);
+    }
+    try testing.expect(!want.fail);
+    try testing.expectEqualSlices(u8, want.out.items, all.items);
+}
