@@ -71,4 +71,5 @@ test {
     _ = @import("test/convert_test.zig");
     _ = @import("test/header_test.zig");
     _ = @import("test/reader_test.zig");
+    _ = @import("test/strict_test.zig");
 }

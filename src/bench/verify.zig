@@ -73,32 +73,33 @@ fn runPull(comptime P: type, text: []const u8, scratch: []u8) Outcome {
     return d.done();
 }
 
-fn runPush(text: []const u8, scratch: []u8) Outcome {
+fn runPush(comptime C: type, text: []const u8, scratch: []u8) Outcome {
     var d = Digest{};
-    csv.simd.forEachField(text, scratch, .{}, &d, Digest.on) catch |e| return .{ .err = @errorName(e) };
+    C.simd.forEachField(text, scratch, .{}, &d, Digest.on) catch |e| return .{ .err = @errorName(e) };
     return d.done();
 }
 
-fn runStream(text: []const u8, window: []u8, scratch: []u8) Outcome {
+fn runStream(comptime C: type, text: []const u8, window: []u8, scratch: []u8) Outcome {
     var d = Digest{};
     var mr = MemReader.init(window, text);
-    csv.streamReader(&mr.interface, scratch, .{}, &d, Digest.on) catch |e| return .{ .err = @errorName(e) };
+    C.streamReader(&mr.interface, scratch, .{}, &d, Digest.on) catch |e| return .{ .err = @errorName(e) };
     return d.done();
 }
 
-/// One path's outcome over `text`, with buffers of its own (for `bench compare`).
-/// Single-threaded use only: the buffers are static.
-pub fn outcome(p: Path, text: []const u8) Outcome {
+/// One path's outcome over `text` using zsift module `C` (the current `csv`, or the
+/// `-Dbaseline` one), with buffers of its own (for `bench compare`). Single-threaded
+/// use only: the buffers are static.
+pub fn outcome(comptime C: type, p: Path, text: []const u8) Outcome {
     const B = struct {
         var scratch: [1 << 20]u8 = undefined;
         var window: [window_len]u8 = undefined;
         var stream_scratch: [window_len]u8 = undefined;
     };
     return switch (p) {
-        .scalar => runPull(csv.Parser, text, &B.scratch),
-        .pull => runPull(csv.SimdParser, text, &B.scratch),
-        .push => runPush(text, &B.scratch),
-        .stream => runStream(text, &B.window, &B.stream_scratch),
+        .scalar => runPull(C.Parser, text, &B.scratch),
+        .pull => runPull(C.SimdParser, text, &B.scratch),
+        .push => runPush(C, text, &B.scratch),
+        .stream => runStream(C, text, &B.window, &B.stream_scratch),
     };
 }
 
@@ -212,8 +213,8 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
             const o = [4]Outcome{
                 runPull(csv.Parser, text, scratch),
                 runPull(csv.SimdParser, text, scratch),
-                runPush(text, scratch),
-                runStream(text, window, stream_scratch),
+                runPush(csv, text, scratch),
+                runStream(csv, text, window, stream_scratch),
             };
             const v = judge(expect, o);
             if (!v.pass) n_fail += 1;

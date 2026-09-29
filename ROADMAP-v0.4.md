@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0 done (2026-09-29); M1 next.** v0.3.1 is the current release. This page is the plan for
+**Status: M0, M1 done (2026-09-29); M2 next.** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -64,6 +64,17 @@ code.
   `zig build compare`: paths alternate within each round, so they share the noise.
 
 ### M1 — Strict path never misparses silently
+
+> ✅ **Done 2026-09-29.** Each chunk that contains a quote is validated with mask
+> operations (`classify.quoteViolation`): an opening quote must start a field or be the
+> second quote of `""`; a closing quote must be followed by a separator, a quote or the
+> end of input; a region still open at EOF is `UnterminatedQuote`. It reads neighbouring
+> bytes only at chunk edges and carries no state, so chunks without quotes pay nothing.
+> Adversarial corpus 27/27 (was 16/19); private corpus 7/7; 9 new unit tests over
+> `next`, `nextInto`, `forEachField` and `streamReader`. Speed vs v0.3.1 (alternating,
+> same process): parity on quote-free files; on a file where 70% of chunks hold quotes,
+> median 0.93–0.97× push, 0.97× pull, 0.96× stream, ranges overlapping. A first design
+> that counted quotes per field cost 5–14% on push and ~35% on pull, and was dropped.
 - A stray quote inside an unquoted field is an error on the SIMD path (`InvalidQuote` or
   `UnterminatedQuote`), not a merged field. Same for an unterminated quote at EOF,
   wherever it opened.

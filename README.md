@@ -134,7 +134,8 @@ try zsift.streamReader(&reader, &scratch, .{}, &sink, Sink.onField);
 const strategy = try zsift.parseReader(gpa, &reader, size_hint, .{}, &sink, Sink.onField);
 ```
 
-Errors: `UnterminatedQuote`, `InvalidQuote` (text after a closing quote),
+Errors: `UnterminatedQuote`, `InvalidQuote` (text after a closing quote, or — on the
+strict SIMD paths — a quote inside an unquoted field),
 `ScratchTooSmall`, `TooManyFields`, `InvalidOptions` (delimiter equals quote, or
 either is a `\n`/`\r`; returned by `init` and the push/stream entry points);
 streaming adds `RecordTooLong`, `ReadFailed`.
@@ -209,9 +210,14 @@ literal data (`3" pipe` parses fine). The SIMD path *cannot* honor that cheaply 
 it finds quoted regions with a parallel prefix-XOR over the quote bitmask, so a
 stray quote would mask the rest of the input as "in string". Every production
 SIMD CSV parser (simdcsv, zsv, Sep) makes the same strict-quoting assumption, so
-`SimdParser` / `forEachField` are for well-formed RFC 4180 input. A differential
-test parses a generated corpus through the scalar and SIMD parsers and asserts
-they agree on every field.
+`SimdParser` / `forEachField` / `streamReader` are for well-formed RFC 4180 input — and
+since v0.4 they **reject** anything else instead of guessing: each chunk that contains a
+quote is checked with a few mask operations (an opening quote must start a field or
+complete a `""`; a closing quote must be followed by a separator, a quote or the end),
+and a violation is an `InvalidQuote` error. Before, a stray quote silently merged every
+following field. Chunks without quotes pay nothing; quote-dense data pays about 3–7%.
+`zig build verify` checks all paths against the scalar parser, over the adversarial
+corpus from `zig build gen-adversarial` and any real files you point it at.
 
 ## Build
 

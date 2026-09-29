@@ -35,6 +35,20 @@ pub fn build(b: *std.Build) void {
     });
     bench_mod.addImport("csv", csv_mod);
 
+    // `-Dbaseline=<path/to/other/zsift/src/csv.zig>`: a second zsift (e.g. a checkout of
+    // an older tag) compiled into the same bench binary, so `compare` can alternate
+    // `push` with `push@base` in one process. Without it, `@base` paths are refused.
+    const baseline = b.option([]const u8, "baseline", "Another zsift's src/csv.zig to A/B against (`compare --paths push,push@base`)");
+    const base_mod = if (baseline) |path| b.createModule(.{
+        .root_source_file = .{ .cwd_relative = path },
+        .target = target,
+        .optimize = optimize,
+    }) else csv_mod;
+    bench_mod.addImport("csv_base", base_mod);
+    const bench_opts = b.addOptions();
+    bench_opts.addOption(?[]const u8, "baseline", baseline);
+    bench_mod.addOptions("bench_options", bench_opts);
+
     const bench = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
     b.installArtifact(bench);
 

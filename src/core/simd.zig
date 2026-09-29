@@ -20,10 +20,11 @@
 //! make the three copies harder to keep in sync. With the `classify` primitives
 //! folded in it sits at ~510 lines, comfortably under the repo's 700-line ceiling.
 //!
-//! IMPORTANT — these assume RFC 4180-strict quoting: a field containing a quote
-//! must be fully quoted. Unlike the scalar parser, a bare quote in the middle of
-//! an unquoted field is NOT treated as literal here (the prefix-XOR would mask
-//! the rest of the input as in-string). Use the scalar `Parser` for lenient input.
+//! IMPORTANT — these are RFC 4180-strict: a field containing a quote must be fully
+//! quoted. A bare quote in an unquoted field (or text after a closing quote) is an
+//! `InvalidQuote` error, found per chunk by `classify.quoteViolation`, never literal
+//! data: the prefix-XOR would already have masked what follows it as in-string.
+//! Use the scalar `Parser` for lenient input.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -90,8 +91,8 @@ pub const classify = struct {
         return quoteBitsAndInside(v, quote, carry).inside;
     }
 
-    /// Separators plus the chunk's quote bitmask (see `classifyAtFull`).
-    pub const Classified = struct { seps: u64, quotes: u64 };
+    /// Separators, the chunk's quote bitmask and its in-quote mask (see `classifyAtFull`).
+    pub const Classified = struct { seps: u64, quotes: u64, inside: u64 };
 
     /// Field/record separators (delimiter, `\n`, `\r`) outside quoted regions.
     pub inline fn classifyAt(input: []const u8, base: usize, opts: Options, carry: *u64) u64 {
@@ -111,7 +112,46 @@ pub const classify = struct {
         const delim_bits: u64 = @bitCast(v == @as(Vec, @splat(opts.delimiter)));
         const lf_bits: u64 = @bitCast(v == @as(Vec, @splat('\n')));
         const cr_bits: u64 = @bitCast(v == @as(Vec, @splat('\r')));
-        return .{ .seps = (delim_bits | lf_bits | cr_bits) & ~qi.inside, .quotes = qi.quotes };
+        return .{ .seps = (delim_bits | lf_bits | cr_bits) & ~qi.inside, .quotes = qi.quotes, .inside = qi.inside };
+    }
+
+    /// True if the chunk at `base` places a quote against RFC 4180. An opening quote
+    /// must start a field (follow a separator or the input start) or be the second
+    /// quote of an escaped `""` (follow a closing quote); a closing quote must be
+    /// followed by a separator, that second quote, or the end of input. Anything else
+    /// (a stray quote in an unquoted field, text after a closing quote) would flip the
+    /// in-quote mask and silently merge fields. Call it only for a chunk with quotes
+    /// (`cl.quotes != 0`): a chunk without any cannot violate, so clean data pays
+    /// nothing. The context outside the chunk comes from the two neighbouring bytes and
+    /// `carry_in` (the in-quote state entering the chunk), so no state is carried.
+    pub inline fn quoteViolation(input: []const u8, base: usize, opts: Options, cl: Classified, carry_in: u64) bool {
+        const q = cl.quotes;
+        const close = q & ~cl.inside;
+        const open = q & cl.inside;
+        // An opening quote must follow a separator or a closing quote (the `""` case).
+        var ok_prev = (cl.seps | close) << 1;
+        if (open & 1 != 0) {
+            // Bit 0 follows the byte before the chunk: input start, a separator, or a
+            // quote that closed a region (the state entering the chunk is outside).
+            const pb = if (base > 0) input[base - 1] else opts.delimiter;
+            if (pb == opts.delimiter or pb == '\n' or pb == '\r' or (pb == opts.quote and carry_in == 0)) ok_prev |= 1;
+        }
+        if (open & ~ok_prev != 0) return true;
+
+        // A closing quote must be followed by a separator, a quote, or the end of input.
+        var follow_ok = (cl.seps | q) >> 1;
+        const valid_len = input.len - base;
+        if (valid_len < chunk_len) follow_ok |= ~((@as(u64, 1) << @intCast(valid_len)) -% 1) >> 1;
+        if (close >> 63 != 0) {
+            // Bit 63 is followed by the next chunk's first byte (or the end of input).
+            if (valid_len == chunk_len) {
+                follow_ok |= @as(u64, 1) << 63;
+            } else {
+                const nb = input[base + chunk_len];
+                if (nb == opts.delimiter or nb == '\n' or nb == '\r' or nb == opts.quote) follow_ok |= @as(u64, 1) << 63;
+            }
+        }
+        return close & ~follow_ok != 0;
     }
 
     /// Record terminators (`\n`, `\r`) outside quoted regions. Used by streaming to
@@ -250,7 +290,9 @@ pub fn forEachField(
     var qbc: u64 = 0;
     var fs_q: u64 = 0;
     while (base < input.len) : (base += classify.chunk_len) {
+        const carry_in = carry;
         const cl = classifyAtFull(input, base, opts, &carry);
+        if (cl.quotes != 0 and classify.quoteViolation(input, base, opts, cl, carry_in)) return Error.InvalidQuote;
         var s = cl.seps;
         // A chunk with no quote bytes can hold no escape, so `quotes_up_to` is just
         // the running `qbc` — skip the per-field popcount (keeps clean data at parity).
@@ -280,6 +322,7 @@ pub fn forEachField(
         }
         if (has_q) qbc += @popCount(cl.quotes);
     }
+    if (carry != 0) return Error.UnterminatedQuote; // a quoted region is open at EOF
     if (field_start < input.len) {
         // Final field with no terminator: `qbc` now counts every quote in the input.
         const needs = input[field_start] == quote and (qbc - fs_q) > 2;
@@ -349,9 +392,11 @@ pub const SimdParser = struct {
     }
 
     /// Classify the next 64-byte chunk (zero-padded at EOF) into `structural`.
-    fn loadChunk(self: *SimdParser) void {
+    fn loadChunk(self: *SimdParser) Error!void {
         self.quotes_before += @popCount(self.quotes); // finalize the chunk being left
+        const carry_in = self.carry;
         const cl = classifyAtFull(self.input, self.next_base, self.opts, &self.carry);
+        if (cl.quotes != 0 and classify.quoteViolation(self.input, self.next_base, self.opts, cl, carry_in)) return Error.InvalidQuote;
         self.structural = cl.seps;
         self.quotes = cl.quotes;
         self.scan_base = self.next_base;
@@ -397,6 +442,7 @@ pub const SimdParser = struct {
 
             if (self.next_base >= self.input.len) {
                 if (self.finished) return null;
+                if (self.carry != 0) return Error.UnterminatedQuote; // quoted region open at EOF
                 // A real final field (input did not end on a terminator).
                 if (self.field_start < self.input.len) {
                     self.finished = true;
@@ -414,7 +460,7 @@ pub const SimdParser = struct {
                 }
                 return null;
             }
-            self.loadChunk();
+            try self.loadChunk();
         }
     }
 
@@ -481,6 +527,7 @@ pub const SimdParser = struct {
             }
             if (next_base >= self.input.len) {
                 if (finished) break;
+                if (carry != 0) return Error.UnterminatedQuote; // quoted region open at EOF
                 if (field_start < self.input.len) {
                     finished = true;
                     const needs = self.input[field_start] == quote and
@@ -501,7 +548,9 @@ pub const SimdParser = struct {
             }
             // loadChunk, inline (keeps state in locals)
             quotes_before += @popCount(quotes);
+            const carry_in = carry;
             const cl = classifyAtFull(self.input, next_base, self.opts, &carry);
+            if (cl.quotes != 0 and classify.quoteViolation(self.input, next_base, self.opts, cl, carry_in)) return Error.InvalidQuote;
             structural = cl.seps;
             quotes = cl.quotes;
             scan_base = next_base;

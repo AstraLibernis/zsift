@@ -5,6 +5,9 @@
 //!
 //!   bench compare [--rounds N] [--paths scalar,pull,push,stream] [--out PATH] [files/dirs]
 //!
+//! A path may be suffixed `@base` (e.g. `--paths push,push@base`) to run it on the zsift
+//! compiled in with `-Dbaseline=<other zsift>/src/csv.zig` — an A/B across versions.
+//!
 //! Each round times ONE full pass of every path over the file, in an order rotated per
 //! round, so all contenders share whatever noise the machine has at that moment. The
 //! paths' outputs are checked identical (bench verify's digests) before anything is
@@ -15,6 +18,8 @@
 
 const std = @import("std");
 const csv = @import("csv");
+const csv_base = @import("csv_base");
+const bench_options = @import("bench_options");
 const verify = @import("verify.zig");
 const MemReader = @import("memreader.zig").MemReader;
 
@@ -39,24 +44,42 @@ const Sum = struct {
     }
 };
 
+/// One timed contender: a parser path on the current zsift, or on the baseline.
+const Contender = struct {
+    path: Path,
+    base: bool = false,
+
+    fn name(c: Contender, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ @tagName(c.path), if (c.base) "@base" else "" }) catch "?";
+    }
+
+    fn outcome(c: Contender, text: []const u8) verify.Outcome {
+        return if (c.base) verify.outcome(csv_base, c.path, text) else verify.outcome(csv, c.path, text);
+    }
+};
+
 const Bufs = struct { scratch: []u8, window: []u8, stream_scratch: []u8 };
 
-/// One full pass of `path` over `text`; returns a checksum so the work cannot be elided.
-fn pass(path: Path, text: []const u8, b: Bufs) !u64 {
+/// One full pass of `c` over `text`; returns a checksum so the work cannot be elided.
+fn pass(c: Contender, text: []const u8, b: Bufs) !u64 {
+    return if (c.base) passWith(csv_base, c.path, text, b) else passWith(csv, c.path, text, b);
+}
+
+fn passWith(comptime C: type, path: Path, text: []const u8, b: Bufs) !u64 {
     var s = Sum{};
     switch (path) {
         inline .scalar, .pull => |p| {
-            const P = if (p == .scalar) csv.Parser else csv.SimdParser;
+            const P = if (p == .scalar) C.Parser else C.SimdParser;
             var it = try P.init(text, b.scratch, .{});
             while (try it.next()) |f| {
                 s.on(f.bytes, f.last_in_record);
                 it.resetScratch();
             }
         },
-        .push => try csv.simd.forEachField(text, b.scratch, .{}, &s, Sum.on),
+        .push => try C.simd.forEachField(text, b.scratch, .{}, &s, Sum.on),
         .stream => {
             var mr = MemReader.init(b.window, text);
-            try csv.streamReader(&mr.interface, b.stream_scratch, .{}, &s, Sum.on);
+            try C.streamReader(&mr.interface, b.stream_scratch, .{}, &s, Sum.on);
         },
     }
     return s.sum;
@@ -70,15 +93,21 @@ fn stat(alloc: Allocator, xs: []const f64) !Stat {
     return .{ .median = v[v.len / 2], .min = v[0], .max = v[v.len - 1] };
 }
 
-fn parsePaths(alloc: Allocator, spec: []const u8) ![]Path {
-    var out: std.ArrayList(Path) = .empty;
+fn parsePaths(alloc: Allocator, spec: []const u8) ![]Contender {
+    var out: std.ArrayList(Contender) = .empty;
     var it = std.mem.splitScalar(u8, spec, ',');
-    while (it.next()) |name| {
+    while (it.next()) |item| {
+        const base = std.mem.endsWith(u8, item, "@base");
+        const name = if (base) item[0 .. item.len - 5] else item;
         const p = std.meta.stringToEnum(Path, name) orelse {
-            print("error: unknown path '{s}' (scalar|pull|push|stream)\n", .{name});
+            print("error: unknown path '{s}' (scalar|pull|push|stream, optionally @base)\n", .{item});
             return error.BadArgs;
         };
-        try out.append(alloc, p);
+        if (base and bench_options.baseline == null) {
+            print("error: '{s}' needs a baseline: build with -Dbaseline=<other zsift>/src/csv.zig\n", .{item});
+            return error.BadArgs;
+        }
+        try out.append(alloc, .{ .path = p, .base = base });
     }
     if (out.items.len == 0) return error.BadArgs;
     return out.toOwnedSlice(alloc);
@@ -89,7 +118,7 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     const alloc = init.arena.allocator();
 
     var rounds: usize = 15;
-    var paths: []const Path = &.{ .scalar, .pull, .push, .stream };
+    var paths: []const Contender = &.{ .{ .path = .scalar }, .{ .path = .pull }, .{ .path = .push }, .{ .path = .stream } };
     var out_path: ?[]const u8 = null;
     var roots: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
@@ -132,7 +161,9 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     };
     const n = paths.len;
     const cpus = std.Thread.getCpuCount() catch 0;
-    print("alternating comparison: {d} rounds (+1 warm-up), {d} logical CPUs, not fenced — read the ratios\n\n", .{ rounds, cpus });
+    print("alternating comparison: {d} rounds (+1 warm-up), {d} logical CPUs, not fenced — read the ratios\n", .{ rounds, cpus });
+    if (bench_options.baseline) |bp| print("baseline (@base): {s}\n", .{bp});
+    print("\n", .{});
 
     var report: std.ArrayList(u8) = .empty;
     try report.print(alloc, "{{\"rounds\":{d},\"cpus\":{d},\"files\":[", .{ rounds, cpus });
@@ -144,9 +175,9 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
             const text = try Io.Dir.cwd().readFileAlloc(io, file, alloc, .unlimited);
 
             // Identical output first, or the timings compare different work.
-            const ref = verify.outcome(paths[0], text);
+            const ref = paths[0].outcome(text);
             var agree = ref.err == null;
-            for (paths[1..]) |p| agree = agree and verify.outcome(p, text).eql(ref);
+            for (paths[1..]) |c| agree = agree and c.outcome(text).eql(ref);
             if (!agree) {
                 print("SKIP  {s}: paths disagree or error — run `bench verify` on it\n", .{file});
                 n_skipped += 1;
@@ -167,10 +198,12 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
 
             const mb = @as(f64, @floatFromInt(text.len)) / 1e6;
             print("{s}  ({d:.1} MB)\n", .{ file, mb });
-            print("  {s:<8} {s:>10} {s:>21} {s:>28}\n", .{ "path", "MB/s med", "MB/s min–max", "vs first: median [min, max]" });
+            print("  {s:<12} {s:>10} {s:>21} {s:>28}\n", .{ "path", "MB/s med", "MB/s min–max", "vs first: median [min, max]" });
             if (n_files > 0) try report.append(alloc, ',');
-            try report.print(alloc, "{{\"file\":\"{s}\",\"bytes\":{d},\"first\":\"{s}\",\"paths\":{{", .{ file, text.len, @tagName(paths[0]) });
+            var nb0: [32]u8 = undefined;
+            try report.print(alloc, "{{\"file\":\"{s}\",\"bytes\":{d},\"first\":\"{s}\",\"paths\":{{", .{ file, text.len, paths[0].name(&nb0) });
             for (paths, 0..) |p, j| {
+                var nb: [32]u8 = undefined;
                 const mbs = try alloc.alloc(f64, rounds);
                 const ratio = try alloc.alloc(f64, rounds);
                 for (0..rounds) |r| {
@@ -179,9 +212,9 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
                 }
                 const m = try stat(alloc, mbs);
                 const q = try stat(alloc, ratio);
-                print("  {s:<8} {d:>10.0} {d:>10.0}–{d:<10.0} {d:>10.2}x [{d:.2}, {d:.2}]\n", .{ @tagName(p), m.median, m.min, m.max, q.median, q.min, q.max });
+                print("  {s:<12} {d:>10.0} {d:>10.0}–{d:<10.0} {d:>10.2}x [{d:.2}, {d:.2}]\n", .{ p.name(&nb), m.median, m.min, m.max, q.median, q.min, q.max });
                 if (j > 0) try report.append(alloc, ',');
-                try report.print(alloc, "\"{s}\":{{\"mbs_median\":{d:.1},\"mbs_min\":{d:.1},\"mbs_max\":{d:.1},\"ratio_median\":{d:.3},\"ratio_min\":{d:.3},\"ratio_max\":{d:.3},\"samples_ns\":[", .{ @tagName(p), m.median, m.min, m.max, q.median, q.min, q.max });
+                try report.print(alloc, "\"{s}\":{{\"mbs_median\":{d:.1},\"mbs_min\":{d:.1},\"mbs_max\":{d:.1},\"ratio_median\":{d:.3},\"ratio_min\":{d:.3},\"ratio_max\":{d:.3},\"samples_ns\":[", .{ p.name(&nb), m.median, m.min, m.max, q.median, q.min, q.max });
                 for (ns[j], 0..) |x, r| {
                     if (r > 0) try report.append(alloc, ',');
                     try report.print(alloc, "{d:.0}", .{x});
