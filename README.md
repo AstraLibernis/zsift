@@ -10,8 +10,8 @@ facade that picks slurp-vs-stream by size.
 ## Status — complete (v0.3.0)
 
 zsift set out to answer one question: **can you build a faster CSV parser in Zig?**
-The answer is yes. On a parse-every-field task it measured ~2–3× a purpose-built SIMD
-C parser (`zsv`) and ~2.5–7× the common full-featured library (`rust-csv`); with the
+The answer is yes. On a parse-every-field task it measured ~2.1–2.85× a purpose-built SIMD
+C parser (`zsv`) and ~3.0–5.2× the common full-featured library (`rust-csv`); with the
 opt-in [typed layers](#typed-layers) it still beats `rust-csv`'s serde path (~1.4×
 fenced) on the same deserialize-into-structs task — and it stays correct and fast on
 real messy data (validated against the Titanic dataset: exact survivor/missing-value
@@ -23,8 +23,8 @@ already fill that space. Bug fixes welcome; scope expansion is out of scope by d
 ## What it is — a speedster, not an all-purpose library
 
 zsift does **one job, fast**: turn delimited bytes into fields. That narrow focus
-*is* the value — on this VM it measured ~2–2.85× a purpose-built SIMD C parser
-(`zsv`) and ~3–5× the common full-featured library (`rust-csv`) on a parse-every-field
+*is* the value — on this VM it measured ~2.1–2.85× a purpose-built SIMD C parser
+(`zsv`) and ~3.0–5.2× the common full-featured library (`rust-csv`) on a parse-every-field
 task (see [bench/vs-csv-parsers/](bench/vs-csv-parsers/); numbers are VM-specific,
 ratios are the point).
 
@@ -355,10 +355,9 @@ rather than running unfenced.
 > [bench/vs-csv-parsers/](bench/vs-csv-parsers/). The remaining libraries above are
 > surveyed, not raced.
 
-## Status — settled
+## Roadmap — all done
 
-Stable and feature-complete for its scope (Zig 0.16). Everything the design set out
-to do is built and measured:
+Everything the design set out to do is built and measured (see [Status](#status--complete-v030)):
 
 - [x] SIMD structural-scan fast path (`@Vector`, portable prefix-XOR)
 - [x] Inlined push/callback API to cut per-field dispatch overhead
@@ -374,10 +373,13 @@ to do is built and measured:
 - [x] Batched pull (`nextInto`) to amortize the per-call iterator cost
 - [x] Reproducible method-selection experiment (`zig build experiment`) + write-up;
       benchmarked head-to-head against rust-csv and zsv (`bench/vs-csv-parsers/`)
+- [x] Opt-in typed layers (v0.3.0): `Field.as(T)` / `trimmed`, `Header`, `reader(T)`,
+      `Record` — zero cost when unused, raw scan untouched
 
 **Scope is intentionally closed** (see [What it is](#what-it-is--a-speedster-not-an-all-purpose-library)):
-dialect and convenience features — comment lines, trimming, per-column rules, typed
-deserialization, writing — are *out of scope*, not backlog. The only conceivable
+dialect features — comment lines, per-column rules, encodings, writing — are *out of
+scope*, not backlog. (Trimming and typed deserialization shipped in v0.3.0 as opt-in
+layers over the borrowed fields, precisely because they cost nothing on the raw path.) The only conceivable
 further work is speed, not surface — trimming field-delivery overhead (the remaining
 gap to the scan ceiling) and multi-core parsing at safe record boundaries — and
 neither is planned. zsift is done until a real workload asks for one.

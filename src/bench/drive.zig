@@ -140,9 +140,9 @@ fn runUnits(init: std.process.Init, alloc: Allocator, units: []const Unit, opts:
     const reps_s = try std.fmt.allocPrint(alloc, "{d}", .{opts.reps});
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{
-        bf,           "--units",      uf,          "--bound", opts.bound,
-        "--wait",     opts.wait,      "--reps",    reps_s,    "--metric",
-        opts.metric,  "--direction",  opts.direction,
+        bf,          "--units",     uf,             "--bound", opts.bound,
+        "--wait",    opts.wait,     "--reps",       reps_s,    "--metric",
+        opts.metric, "--direction", opts.direction,
     });
     if (opts.out.len != 0) try argv.appendSlice(alloc, &.{ "--out", opts.out });
 

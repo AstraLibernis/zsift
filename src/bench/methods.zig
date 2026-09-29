@@ -19,7 +19,7 @@ const reps = 7;
 /// How a field decides it contains an escaped `""`.
 pub const Detect = enum {
     none, // assume no escape (wrong on escaped fields) — isolates delivery cost
-    rescan, // std.mem.indexOfScalar over the field bytes (the current parser)
+    rescan, // std.mem.findScalar over the field bytes (the current parser)
     swar, // word-at-a-time (SWAR) byte search
     accum, // running quote-count from the SIMD mask (popcount, no byte re-scan)
 };
@@ -28,7 +28,7 @@ pub const Detect = enum {
 pub const Collapse = enum {
     none, // skip (wrong on escaped fields) — isolates detection cost
     byteloop, // byte-by-byte with a per-byte branch (the current parser)
-    memcpy, // copy clean runs with @memcpy (std.mem.indexOfScalarPos finds runs)
+    memcpy, // copy clean runs with @memcpy (std.mem.findScalarPos finds runs)
     swarcpy, // copy clean runs with @memcpy, but a SWAR word-scan finds the runs
     mask, // copy clean runs, but the classifier's quote mask (@ctz) finds the runs
 };
@@ -98,7 +98,7 @@ fn collapseMemcpy(in: []const u8, quote: u8, dst: []u8) []const u8 {
     var w: usize = 0;
     var j: usize = 0;
     while (j < in.len) {
-        const nq = std.mem.indexOfScalarPos(u8, in, j, quote) orelse in.len;
+        const nq = std.mem.findScalarPos(u8, in, j, quote) orelse in.len;
         const run = nq - j;
         @memcpy(dst[w..][0..run], in[j..][0..run]);
         w += run;
@@ -215,7 +215,7 @@ fn parseChecksum(comptime d: Detect, comptime c: Collapse, input: []const u8, sc
         const raw = input[field_start..];
         const needs = switch (d) {
             .none => false,
-            .rescan => raw.len >= 2 and raw[0] == quote and std.mem.indexOfScalar(u8, raw[1 .. raw.len - 1], quote) != null,
+            .rescan => raw.len >= 2 and raw[0] == quote and std.mem.findScalar(u8, raw[1 .. raw.len - 1], quote) != null,
             .swar => raw.len >= 2 and raw[0] == quote and swarHasByte(raw[1 .. raw.len - 1], quote),
             .accum => (qbc - fs_q) > 2,
         };
@@ -227,7 +227,7 @@ fn parseChecksum(comptime d: Detect, comptime c: Collapse, input: []const u8, sc
 inline fn detect(comptime d: Detect, raw: []const u8, quote: u8, q: u64, rel: usize, has_q: bool, qbc: *u64, fs_q: *u64) bool {
     switch (d) {
         .none => return false,
-        .rescan => return raw.len >= 2 and raw[0] == quote and std.mem.indexOfScalar(u8, raw[1 .. raw.len - 1], quote) != null,
+        .rescan => return raw.len >= 2 and raw[0] == quote and std.mem.findScalar(u8, raw[1 .. raw.len - 1], quote) != null,
         .swar => return raw.len >= 2 and raw[0] == quote and swarHasByte(raw[1 .. raw.len - 1], quote),
         .accum => {
             const q_up_to = if (has_q) qbc.* + quotesBelow(q, rel) else qbc.*;
@@ -291,8 +291,8 @@ pub fn runCell(detect_name: []const u8, collapse_name: []const u8, corpus: []con
 fn Classifier(comptime W: usize) type {
     return struct {
         const Vec = @Vector(W, u8);
-        const Mask = std.meta.Int(.unsigned, W);
-        const SMask = std.meta.Int(.signed, W);
+        const Mask = @Int(.unsigned, W);
+        const SMask = @Int(.signed, W);
 
         fn prefixXor(x: Mask) Mask {
             var r = x;

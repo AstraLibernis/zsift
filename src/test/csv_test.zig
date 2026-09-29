@@ -197,10 +197,9 @@ test "differential: scalar vs simd agree on a generated corpus" {
     var prng = std.Random.DefaultPrng.init(0xD1FF_C5_7A);
     const r = prng.random();
     const cells = [_][]const u8{
-        "plain",       "with space",    "",
-        "\"a,b\"",     "\"line\nbrk\"", "\"q\"\"q\"",
-        "1234567890",  "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
-        "\"crlf\r\n2\"",
+        "plain",      "with space",                                                                 "",
+        "\"a,b\"",    "\"line\nbrk\"",                                                              "\"q\"\"q\"",
+        "1234567890", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "\"crlf\r\n2\"",
     };
     var rows: usize = 0;
     while (rows < 400) : (rows += 1) {

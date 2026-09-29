@@ -211,7 +211,7 @@ test "simd: differential fuzz — push and pull match generated fields" {
                     };
                     try val.append(alloc, c);
                 }
-                const must_quote = std.mem.indexOfAny(u8, val.items, ",\"\n") != null;
+                const must_quote = std.mem.findAny(u8, val.items, ",\"\n") != null;
                 if (must_quote or rnd.boolean()) {
                     try csv.append(alloc, '"');
                     for (val.items) |c| {

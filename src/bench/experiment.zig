@@ -51,7 +51,7 @@ fn appendInt(out: *std.ArrayList(u8), alloc: std.mem.Allocator, n: usize) !void 
 /// Emit `value` as a CSV field, quoting + escaping (`"`→`""`) when it contains a
 /// delimiter, quote, or newline (RFC 4180) — what a correct writer produces.
 fn emitField(out: *std.ArrayList(u8), alloc: std.mem.Allocator, value: []const u8) !void {
-    if (std.mem.indexOfAny(u8, value, ",\"\n") == null) {
+    if (std.mem.findAny(u8, value, ",\"\n") == null) {
         try out.appendSlice(alloc, value);
         return;
     }

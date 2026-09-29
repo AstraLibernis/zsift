@@ -98,9 +98,9 @@ fn generate(alloc: std.mem.Allocator, prof: Profile) ![]u8 {
     const r = prng.random();
 
     const words = [_][]const u8{
-        "alpha",  "bravo", "charlie", "delta", "echo",  "foxtrot",
-        "golf",   "hotel", "india",   "juliet", "kilo", "lima",
-        "1234",   "56.78", "true",    "",      "n/a",   "x",
+        "alpha", "bravo", "charlie", "delta",  "echo", "foxtrot",
+        "golf",  "hotel", "india",   "juliet", "kilo", "lima",
+        "1234",  "56.78", "true",    "",       "n/a",  "x",
     };
 
     var out: std.ArrayList(u8) = .empty;

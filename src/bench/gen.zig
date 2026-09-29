@@ -115,7 +115,7 @@ fn genStructured(alloc: Allocator, quote_pct: u8, escape_pct: u8) ![]u8 {
 /// cell is clean (no quoting/escaping needed) so all three parsers deserialize it.
 pub const typed_header = "id,price,flag,name,category\n";
 const typed_names = [_][]const u8{
-    "alpha", "bravo", "charlie", "delta", "echo",  "foxtrot",
+    "alpha", "bravo", "charlie", "delta",  "echo", "foxtrot",
     "golf",  "hotel", "india",   "juliet", "kilo", "lima",
 };
 const typed_cats = [_][]const u8{ "alpha", "bravo", "charlie", "delta" };
@@ -160,8 +160,8 @@ fn typed(init: std.process.Init, alloc: Allocator, rest: []const []const u8) !vo
 // ---------------------------------------------------------------------------
 
 const short_vocab = [_][]const u8{
-    "alpha", "bravo", "charlie", "delta", "echo",  "golf",
-    "hotel", "x",     "",        "n/a",   "true",  "false",
+    "alpha", "bravo", "charlie", "delta", "echo", "golf",
+    "hotel", "x",     "",        "n/a",   "true", "false",
 };
 const styles = [_][]const u8{ "short", "numeric", "long", "mixed" };
 const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
