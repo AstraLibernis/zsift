@@ -1,23 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 AstraLibernis
 
-//! Exact record boundaries for splitting one input across workers.
+//! Multi-core parsing: split one input at exact record starts, parse ranges in parallel.
 //!
-//! Cutting a CSV at arbitrary byte offsets is only safe at a record start, and whether
-//! a newline starts a record depends on whether it sits inside a quoted field — which
-//! depends on every quote before it. Under strict RFC 4180 quoting (enforced by the
-//! SIMD paths since v0.4), a position is inside a quoted field iff an odd number of
-//! quote bytes precede it: an escaped `""` adds two. So the split is exact, with no
-//! speculation, in two phases that each parallelize:
-//!
-//!   1. `countQuotes` over each range, independently;
-//!   2. a prefix sum of those counts gives each cut its in-quote state, and
-//!      `recordStartAfter` scans forward from each cut, independently, to the first
-//!      record start.
-//!
-//! `splitRecords` runs both phases serially; `forEachField` runs them, and then the
-//! parse of each range, on the caller's `std.Io` (one task per worker). Invalid quoting
-//! is reported by the parser that consumes each range (`classify.quoteViolation`).
+//! Under strict RFC 4180 quoting (enforced by the SIMD paths), a position is inside a
+//! quoted field iff an odd number of quotes precede it (`""` adds two). So the split is
+//! exact, without speculation, in two parallel phases: `countQuotes` per range, then a
+//! prefix parity per cut and `recordStartAfter` from each cut. `splitRecords` is the
+//! serial reference; `forEachField` runs the phases and the range parses on the caller's
+//! `std.Io`. Invalid quoting is reported by each range's parser.
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -42,17 +33,14 @@ pub fn countQuotes(bytes: []const u8, quote: u8) u64 {
     return total;
 }
 
-/// The first record start at or after `from`, given whether `from` lies inside a
-/// quoted field (`in_quote`, from the quote-count prefix). Returns `input.len` if no
-/// record starts at or after `from`. A cut between the `\r` and `\n` of a CRLF moves
-/// past the `\n`, never splitting the terminator.
+/// First record start at or after `from` (`input.len` if none), given whether `from`
+/// is inside a quoted field. A cut inside a CRLF moves past the `\n`.
 pub fn recordStartAfter(input: []const u8, from: usize, in_quote: bool, opts: Options) usize {
     assert(from <= input.len);
     if (from == 0) return 0;
     if (from == input.len) return input.len;
     if (!in_quote) {
-        // `from` already starts a record if the byte before it ended one (outside quotes,
-        // since the state after a terminator equals the state before it).
+        // Already a record start if the previous byte ended a record.
         const prev = input[from - 1];
         if (prev == '\n' or (prev == '\r' and input[from] != '\n')) return from;
     }
@@ -69,17 +57,13 @@ pub fn recordStartAfter(input: []const u8, from: usize, in_quote: bool, opts: Op
     return input.len;
 }
 
-/// Split `input` into `bounds.len - 1` ranges that each begin at a record start:
-/// `bounds[0] = 0`, `bounds[last] = input.len`, non-decreasing (a range is empty when
-/// one record spans its whole cut). Ranges are cut near equal byte offsets. An odd
-/// total number of quotes means a quoted field never closes: `UnterminatedQuote`.
-/// This is the serial reference of the two-phase algorithm described above.
+/// Split `input` into `bounds.len - 1` ranges near equal offsets, each starting at a
+/// record start (non-decreasing; empty when one record spans a cut). Serial reference
+/// of the two phases. An odd quote total is `UnterminatedQuote`.
 pub fn splitRecords(input: []const u8, opts: Options, bounds: []usize) Error!void {
     try opts.validate();
     assert(bounds.len >= 2);
     const n = bounds.len - 1;
-    // Phase 1 (parallel per range in a driver): quote count of each raw range.
-    // Phase 2: prefix parity at each cut, then the record start after it.
     var quotes_before: u64 = 0;
     var prev_cut: usize = 0;
     bounds[0] = 0;
@@ -103,21 +87,13 @@ pub fn rawCut(len: usize, n: usize, i: usize) usize {
 /// Most workers `forEachField` accepts (its bookkeeping lives on the stack).
 pub const max_workers = 256;
 
-/// Parallel push parse: split `input` into `ctxs.len` ranges at record starts and run
-/// `simd.forEachField` over each on the caller's `io`, one task per range. Range `i`'s
-/// fields go, in order, to `onField(ctxs[i], …)` with `scratches[i]` for unescaping, so
-/// concatenating the sinks' output in index order is exactly the serial field
-/// sequence. Workers run concurrently only if `io` provides concurrency (e.g.
-/// `std.Io.Threaded`); zsift itself starts no threads and allocates nothing.
-///
-/// Keep each sink on its own cache line (`align(std.atomic.cache_line)`): workers write
-/// their sinks on every field, and sinks packed side by side made the parallel path
-/// slower than the serial one in measurement (false sharing).
-///
-/// On error, the error of the earliest range that failed is returned — the same error
-/// a serial parse reports, since every range before the first defect is cut exactly.
-/// Sinks may already hold fields from any range when an error is returned.
-pub fn forEachField(
+/// Parallel push parse on exactly `ctxs.len` workers (see `forEachField` for size-based
+/// selection). Range `i` goes to `onField(ctxs[i], …)` with `scratches[i]`; the sinks'
+/// output concatenated in index order is the serial field sequence. Concurrency comes
+/// from `io`; zsift starts no threads and allocates nothing. Keep each sink on its own
+/// cache line: packed sinks (false sharing) measured slower than serial. Errors: the
+/// earliest failing range's, which equals the serial error; sinks may hold partial output.
+pub fn forEachFieldExact(
     io: std.Io,
     input: []const u8,
     opts: Options,
@@ -152,9 +128,8 @@ pub fn forEachField(
         for (0..n) |i| g.async(io, Task.count, .{ &counts[i], input[rawCut(input.len, n, i)..rawCut(input.len, n, i + 1)], opts.quote });
         try g.await(io);
     }
-    // Phase 2: prefix parity at each cut, then the record start after it. An odd total
-    // is not returned here: the range holding the open quote reports it, so an earlier
-    // defect keeps its place in the error order.
+    // Phase 2: prefix parity per cut, then its record start. An odd total is left to the
+    // range holding the open quote, so an earlier defect keeps its place in error order.
     var bounds: [max_workers + 1]usize = undefined;
     {
         var g: std.Io.Group = .init;
@@ -176,4 +151,70 @@ pub fn forEachField(
         try g.await(io);
     }
     for (errs[0..n]) |e| if (e) |err| return err;
+}
+
+/// `forEachFieldExact` on as many of the given workers as the input keeps busy
+/// (`workersFor`): small inputs run serially on `ctxs[0]`; unused sinks get nothing.
+pub fn forEachField(
+    io: std.Io,
+    input: []const u8,
+    opts: Options,
+    scratches: []const []u8,
+    ctxs: anytype,
+    comptime onField: fn (std.meta.Elem(@TypeOf(ctxs)), bytes: []const u8, last_in_record: bool) void,
+) (Error || std.Io.Cancelable)!void {
+    if (ctxs.len == 0 or ctxs.len > max_workers or scratches.len != ctxs.len) return Error.BadWorkerCount;
+    const k = workersFor(input.len, ctxs.len);
+    return forEachFieldExact(io, input, opts, scratches[0..k], ctxs[0..k], onField);
+}
+
+/// Workers worth using for `len` bytes, at most `available`: serial (1) below
+/// `min_parallel_bytes`, else one per `min_bytes_per_worker`.
+pub fn workersFor(len: usize, available: usize) usize {
+    if (len < min_parallel_bytes) return 1;
+    return @max(1, @min(available, len / min_bytes_per_worker));
+}
+
+/// Below this, workers cost more than they save (`zig build sweep`; see ROADMAP M4).
+pub const min_parallel_bytes: usize = 2 << 20;
+
+/// Smallest range worth giving a worker (same sweep).
+pub const min_bytes_per_worker: usize = 384 << 10;
+
+const stream = @import("stream.zig");
+
+/// `parseReader` options. Unlike `stream.AutoOptions`, known-size inputs up to 1 GiB
+/// load into memory by default: the parallel win needs them there.
+pub const ReaderOptions = struct {
+    csv: Options = .{},
+    /// Known-size inputs up to this load into memory; others stream into `ctxs[0]`.
+    in_memory_threshold: usize = 1 << 30,
+    /// Safety cap on the in-memory read.
+    max_in_memory: usize = 1 << 30,
+};
+
+/// Reader facade: load a known-size input and `forEachField` it, or stream it serially
+/// into `ctxs[0]` (`scratches[0]` must hold the reader's window). Returns the strategy.
+pub fn parseReader(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    r: *std.Io.Reader,
+    size_hint: ?u64,
+    ro: ReaderOptions,
+    scratches: []const []u8,
+    ctxs: anytype,
+    comptime onField: fn (std.meta.Elem(@TypeOf(ctxs)), bytes: []const u8, last_in_record: bool) void,
+) !stream.Strategy {
+    try ro.csv.validate();
+    if (ctxs.len == 0 or ctxs.len > max_workers or scratches.len != ctxs.len) return Error.BadWorkerCount;
+    const strategy = stream.decide(size_hint, ro.in_memory_threshold);
+    switch (strategy) {
+        .in_memory => {
+            const buf = try r.allocRemaining(gpa, .limited(ro.max_in_memory));
+            defer gpa.free(buf);
+            try forEachField(io, buf, ro.csv, scratches, ctxs, onField);
+        },
+        .streaming => try stream.streamReader(r, scratches[0], ro.csv, ctxs[0], onField),
+    }
+    return strategy;
 }

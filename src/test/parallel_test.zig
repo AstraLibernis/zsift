@@ -177,7 +177,7 @@ fn parallelOf(io: std.Io, input: []const u8, n: usize) !std.ArrayList(u8) {
         scratches[i] = &bufs[i];
     }
     defer for (cols[0..n]) |*c| c.out.deinit(testing.allocator);
-    try csv.parallel.forEachField(io, input, .{}, scratches[0..n], ptrs[0..n], Collector.on);
+    try csv.parallel.forEachFieldExact(io, input, .{}, scratches[0..n], ptrs[0..n], Collector.on);
     var all: std.ArrayList(u8) = .empty;
     for (cols[0..n]) |*c| {
         try testing.expect(!c.fail);
@@ -268,4 +268,51 @@ test "parallel: worker-count errors are real errors" {
     const one = [_][]u8{&buf};
     try testing.expectError(csv.Error.BadWorkerCount, csv.parallel.forEachField(testing.io, "a\n", .{}, &one, &ptrs, Collector.on));
     try testing.expectError(csv.Error.BadWorkerCount, csv.parallel.forEachField(testing.io, "a\n", .{}, one[0..0], ptrs[0..0], Collector.on));
+}
+
+test "parallel: parseReader in memory equals serial, streaming falls back to ctxs[0]" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Large enough (> min_parallel_bytes) that the in-memory path really goes parallel.
+    const input = try genCsv(alloc, 900, 60_000);
+    defer alloc.free(input);
+    try testing.expect(input.len >= csv.parallel.min_parallel_bytes);
+    var scratch: [1024]u8 = undefined;
+    var want = try serialOf(input, &scratch);
+    defer want.deinit(testing.allocator);
+
+    for ([_]?u64{ input.len, null }) |hint| {
+        var cols: [8]Collector = @splat(.{});
+        var ptrs: [8]*Collector = undefined;
+        var bufs: [8][1 << 16]u8 = undefined;
+        var scratches: [8][]u8 = undefined;
+        for (0..8) |i| {
+            ptrs[i] = &cols[i];
+            scratches[i] = &bufs[i];
+        }
+        defer for (&cols) |*c| c.out.deinit(testing.allocator);
+        var mr = std.Io.Reader.fixed(input);
+        const strategy = try csv.parallel.parseReader(io, alloc, &mr, hint, .{}, &scratches, &ptrs, Collector.on);
+        try testing.expectEqual(if (hint == null) csv.Strategy.streaming else csv.Strategy.in_memory, strategy);
+        var all: std.ArrayList(u8) = .empty;
+        defer all.deinit(testing.allocator);
+        var used: usize = 0;
+        for (&cols) |*c| {
+            used += @intFromBool(c.out.items.len > 0);
+            try all.appendSlice(testing.allocator, c.out.items);
+        }
+        try testing.expectEqualSlices(u8, want.items, all.items);
+        try testing.expect(if (hint == null) used == 1 else used > 1);
+    }
+}
+
+test "parallel: workersFor is serial below the threshold and capped by the workers given" {
+    const p = csv.parallel;
+    try testing.expectEqual(@as(usize, 1), p.workersFor(0, 12));
+    try testing.expectEqual(@as(usize, 1), p.workersFor(p.min_parallel_bytes - 1, 12));
+    try testing.expect(p.workersFor(p.min_parallel_bytes, 12) >= 2);
+    try testing.expectEqual(@as(usize, 12), p.workersFor(1 << 30, 12));
+    try testing.expectEqual(@as(usize, 3), p.workersFor(1 << 30, 3));
 }

@@ -62,8 +62,8 @@ const Digest = struct {
     }
 };
 
-pub const Path = enum { scalar, pull, push, stream, par };
-const path_names = [_][]const u8{ "scalar", "pull", "push", "stream", "par" };
+pub const Path = enum { scalar, pull, push, stream, par, auto };
+const path_names = [_][]const u8{ "scalar", "pull", "push", "stream", "par", "auto" };
 
 fn runPull(comptime P: type, text: []const u8, scratch: []u8) Outcome {
     var d = Digest{};
@@ -75,7 +75,7 @@ fn runPull(comptime P: type, text: []const u8, scratch: []u8) Outcome {
     return d.done();
 }
 
-fn runPush(comptime C: type, text: []const u8, scratch: []u8) Outcome {
+pub fn runPush(comptime C: type, text: []const u8, scratch: []u8) Outcome {
     var d = Digest{};
     C.simd.forEachField(text, scratch, .{}, &d, Digest.on) catch |e| return .{ .err = @errorName(e) };
     return d.done();
@@ -103,6 +103,7 @@ pub fn outcome(comptime C: type, io: Io, p: Path, text: []const u8) Outcome {
         .push => runPush(C, text, &B.scratch),
         .stream => runStream(C, text, &B.window, &B.stream_scratch),
         .par => runPar(C, io, text, workers()),
+        .auto => runAuto(C, io, text, workers()),
     };
 }
 
@@ -128,8 +129,17 @@ const ParSink = struct {
     }
 };
 
-/// `parallel.forEachField` with `n` workers, its sinks replayed in order into a Digest.
-fn runPar(comptime C: type, io: Io, text: []const u8, n: usize) Outcome {
+/// `parallel.forEachFieldExact` with `n` workers (or, `auto`, `parallel.forEachField`
+/// choosing from `n` by size), its sinks replayed in order into a Digest.
+pub fn runPar(comptime C: type, io: Io, text: []const u8, n: usize) Outcome {
+    return runParMode(C, io, text, n, false);
+}
+
+pub fn runAuto(comptime C: type, io: Io, text: []const u8, n: usize) Outcome {
+    return runParMode(C, io, text, n, true);
+}
+
+fn runParMode(comptime C: type, io: Io, text: []const u8, n: usize, auto: bool) Outcome {
     if (!@hasDecl(C, "parallel")) return .{ .err = "NoParallelInThisZsift" };
     const gpa = std.heap.smp_allocator;
     const sinks = gpa.alloc(ParSink, n) catch return .{ .err = "OutOfMemory" };
@@ -146,7 +156,8 @@ fn runPar(comptime C: type, io: Io, text: []const u8, n: usize) Outcome {
         sc.* = bufs[i * window_len ..][0..window_len];
     }
     defer for (sinks) |*s| s.out.deinit(gpa);
-    C.parallel.forEachField(io, text, .{}, scratches, ptrs, ParSink.on) catch |e| return .{ .err = @errorName(e) };
+    const r = if (auto) C.parallel.forEachField(io, text, .{}, scratches, ptrs, ParSink.on) else C.parallel.forEachFieldExact(io, text, .{}, scratches, ptrs, ParSink.on);
+    r catch |e| return .{ .err = @errorName(e) };
     var d = Digest{};
     for (sinks) |*s| {
         if (s.oom) return .{ .err = "OutOfMemory" };
@@ -174,7 +185,7 @@ fn parMismatch(io: Io, text: []const u8, want: Outcome) ?usize {
     return null;
 }
 
-fn judge(expect: cases.Expect, o: [5]Outcome) Verdict {
+fn judge(expect: cases.Expect, o: [6]Outcome) Verdict {
     switch (expect) {
         .agree => {
             for (o[1..], 1..) |x, i| if (!x.eql(o[0])) return .{ .pass = false, .why = path_names[i] };
@@ -279,12 +290,13 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
         for (try listCsv(io, alloc, root)) |file| {
             const text = try Io.Dir.cwd().readFileAlloc(io, file, alloc, .unlimited);
             const expect = try expectFor(io, alloc, file);
-            const o = [5]Outcome{
+            const o = [6]Outcome{
                 runPull(csv.Parser, text, scratch),
                 runPull(csv.SimdParser, text, scratch),
                 runPush(csv, text, scratch),
                 runStream(csv, text, window, stream_scratch),
                 runPar(csv, io, text, workers()),
+                runAuto(csv, io, text, workers()),
             };
             var v = judge(expect, o);
             // Whole-file agreement is a precondition for the split check to mean anything.

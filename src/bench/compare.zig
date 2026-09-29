@@ -95,10 +95,12 @@ fn passWith(comptime C: type, path: Path, text: []const u8, b: Bufs) !u64 {
             var mr = MemReader.init(b.window, text);
             try C.streamReader(&mr.interface, b.stream_scratch, .{}, &s, Sum.on);
         },
-        .par => {
+        .par, .auto => |p| {
             if (!@hasDecl(C, "parallel")) return error.NoParallelInThisZsift;
             for (b.par_sinks) |*w| w.* = .{};
-            try C.parallel.forEachField(b.io, text, .{}, b.par_scratches, b.par_ptrs, Sum.on);
+            if (p == .auto) {
+                try C.parallel.forEachField(b.io, text, .{}, b.par_scratches, b.par_ptrs, Sum.on);
+            } else try C.parallel.forEachFieldExact(b.io, text, .{}, b.par_scratches, b.par_ptrs, Sum.on);
             for (b.par_sinks) |w| s.sum +%= w.sum;
         },
     }
@@ -120,7 +122,7 @@ fn parsePaths(alloc: Allocator, spec: []const u8) ![]Contender {
         const base = std.mem.endsWith(u8, item, "@base");
         const name = if (base) item[0 .. item.len - 5] else item;
         const p = std.meta.stringToEnum(Path, name) orelse {
-            print("error: unknown path '{s}' (scalar|pull|push|stream|par, optionally @base)\n", .{item});
+            print("error: unknown path '{s}' (scalar|pull|push|stream|par|auto, optionally @base)\n", .{item});
             return error.BadArgs;
         };
         if (base and bench_options.baseline == null) {

@@ -14,6 +14,7 @@ const csv = @import("csv");
 const methods = @import("methods.zig");
 const experiment = @import("experiment.zig");
 const compare = @import("compare.zig");
+const sweep = @import("sweep.zig");
 const gen = @import("gen.zig");
 const verify = @import("verify.zig");
 
@@ -291,6 +292,11 @@ pub fn main(init: std.process.Init) !void {
     // judged against the scalar oracle / EXPECT.tsv. See `verify.zig`.
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "verify")) {
         return verify.main(init, argv[2..]);
+    }
+
+    // `bench sweep <file>` — size × worker-count sweep of the parallel path. See `sweep.zig`.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "sweep")) {
+        return sweep.main(init, argv[2..]);
     }
 
     // `bench gen <kind> <dir>` — deterministic corpus generators (structured / random).

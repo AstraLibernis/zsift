@@ -84,6 +84,12 @@ pub fn build(b: *std.Build) void {
     run_compare.addArg("compare");
     if (b.args) |args| run_compare.addArgs(args);
     b.step("compare", "Alternating comparison of parser paths: `zig build compare -Doptimize=ReleaseFast -- [files/dirs]`").dependOn(&run_compare.step);
+
+    // `zig build sweep -Doptimize=ReleaseFast -- <file.csv>` — where the parallel path pays.
+    const run_sweep = b.addRunArtifact(bench);
+    run_sweep.addArg("sweep");
+    if (b.args) |args| run_sweep.addArgs(args);
+    b.step("sweep", "Size x worker-count sweep of the parallel path: `zig build sweep -Doptimize=ReleaseFast -- <file.csv>`").dependOn(&run_sweep.step);
 }
 
 /// A `bench gen <kind>` step. Forwards `-- <args>` (e.g. the output dir). Generators

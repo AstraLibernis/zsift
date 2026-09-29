@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0–M3 done (2026-09-29); M4 next.** v0.3.1 is the current release. This page is the plan for
+**Status: M0–M4 done (2026-09-29); M5 next.** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -125,6 +125,17 @@ code.
   sequence exactly, on every corpus file and every N from 1 to the core count.
 
 ### M4 — Auto-selection
+
+> ✅ **Done 2026-09-29.** `zig build sweep -- <file>` races push against 2–12 workers on
+> record-aligned prefixes from 32 KiB up (results saved beside the private corpus). On
+> two real files every worker count lost below 1 MiB (0.03–0.96×); at 2 MiB ~340 KiB
+> per worker won on both (1.39–1.43×, worst round ≥ 1.08×) while ~170 KiB broke even on
+> one; at 4 MiB ~512 KiB beat ~340 KiB. Hence `parallel.forEachField` is serial below
+> `min_parallel_bytes` = 2 MiB and uses one worker per `min_bytes_per_worker` = 384 KiB
+> above it; `forEachFieldExact` is the manual control arm. Checked with `compare
+> --paths push,auto`: 0.99–1.01× on the four files under 2 MiB (serial), 2.9–3.6× on
+> the three over (worst round ≥ 2.35×). `parallel.parseReader` loads known-size input
+> (≤ 1 GiB by default) and parses it this way; unknown size streams serially.
 - Parallel is on by default above a size threshold; below it the thread start-up costs
   more than it saves. The threshold is measured (a size sweep), not guessed. A serial
   switch stays available as the control arm.
