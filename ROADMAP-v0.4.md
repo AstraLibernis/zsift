@@ -203,9 +203,17 @@ an adversarial case (`seconds_mark_in_coordinates`).
 
 ## Out of scope for v0.4
 
-- Parallel streaming (records straddling reader windows across workers).
-- Lenient quoting on the SIMD path: the scalar `Parser` remains the lenient option.
+- Parallel streaming (records straddling reader windows across workers): no workload
+  needs it; known-size input is parsed multi-core via `parallel.parseReader`, and
+  zarbor loads whole files. A design sketch is kept in README, "Roadmap".
+- Lenient quoting on the SIMD path: the scalar `Parser` remains the lenient option; M1
+  measured per-field quote counting at 5–14% (push) and ~35% (pull).
 - Writing CSV, encodings, dialects: unchanged from v0.3 (see README, "What it is").
+
+**After release (2026-09-29):** re-measured zsift alone and through zarbor on the private
+corpus. zsift's multi-core parse (6.5–8.4 GB/s on the large files) is far faster than
+zarbor's load (0.3–0.46 GB/s, still 1.35–1.75× the pre-zsift loader, tables identical),
+so parsing is no longer where zarbor's time goes. zsift stays parked; see README, Numbers.
 
 ## Test data
 

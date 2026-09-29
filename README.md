@@ -27,6 +27,16 @@ loader**, byte-identically. v0.4 also made the strict paths honest: a stray quot
 unquoted field used to merge every following field silently; it is now an
 `InvalidQuote` error. How it was built and measured: [ROADMAP-v0.4.md](ROADMAP-v0.4.md).
 
+**Where it fits (measured 2026-09-29): zsift is now faster than what uses it.** On the
+same large real files (18–45 MB), zsift alone parses at 6.5–8.4 GB/s multi-core, while zarbor, its one
+real consumer, loads the table at 0.3–0.46 GB/s with every core; parsing is a few percent of
+that load, the rest is converting text to numbers, building dictionaries and allocating.
+A CSV parser is one layer of a data engine (pandas, Arrow, fread, Polars and DuckDB all
+keep a tokenizer inside a larger engine), and at this speed the next wins are in the
+layers around it (conversion, I/O), not in parsing. Its raw speed shows directly only in
+jobs that read everything but convert little: counting rows, checking a file, pulling a
+few columns, splitting a large file at exact record boundaries.
+
 It is deliberately not chasing
 feature-parity with full CSV toolkits (writers, dialects, a CLI); mature options
 already fill that space. Bug fixes welcome; scope expansion is out of scope by design.
@@ -322,6 +332,17 @@ i7-1365U under WSL2 (12 logical CPUs), on real files:
 - Strict quote validation costs nothing on chunks without quotes and ~3–7% on a file
   whose chunks are 70% quoted.
 
+**Re-measured after release (2026-09-29), zsift alone vs through zarbor**, same 7 real
+files, 15 alternating rounds:
+- zsift alone (`compare --paths scalar,push,par`): on 18–45 MB files `par` (12 workers)
+  ran 6.5–8.4 GB/s median, **6.6–8.0× scalar** and 2.2–2.6× single-core push (release
+  run: 2.9–3.6×; a shared VM, so read ranges, not points). On 0.7–1.7 MB files forced
+  12 workers lose to single-core push, as the 2 MiB rule predicts.
+- Through zarbor (zarbor's A/B load harness, zarbor before zsift vs after, every table
+  identical): **1.35–1.75× faster loads**, 0.22–0.46 GB/s vs 0.16–0.27 GB/s before
+  (worst round 1.05× on one small file). The load is bound by zarbor's own per-field
+  work, not by parsing.
+
 For cross-library comparisons — against Rust's common `BurntSushi/rust-csv` and the
 specialist SIMD-C `liquidaty/zsv` (same bytes, matched task, fenced with the now-retired
 benchfence; reproducible at tag v0.3.1) — see [bench/vs-csv-parsers/](bench/vs-csv-parsers/).
@@ -372,6 +393,13 @@ and [`bench/BENCHFENCE.md`](bench/BENCHFENCE.md) documents what it did.
   structural bytes (quotes, commas, newlines) per 64-byte chunk with vector
   compares, then a branchless prefix-XOR carry masks separators inside quotes —
   the same approach zsift re-derived here.
+- **Full engines** (noted 2026-09-29, from their documentation, not raced) — pandas,
+  Arrow C++ / pyarrow, data.table `fread`, Polars, DuckDB and vroom each wrap a tokenizer
+  in type detection, conversion and a column builder. The parallel ones split the input
+  into chunks and must find a record start after each cut: `fread`, Polars and DuckDB
+  sample the file first (delimiter, types, typical row length); Arrow lets the caller
+  declare that quoted values hold no newlines (`newlines_in_values`); DuckDB guesses a
+  start and checks it. zsift's split is exact instead: a quote-count prefix, no guess.
 
 > **Raced (2026-07-07).** zsift has now been benchmarked head-to-head against two of
 > the above — same corpus bytes, a matched parse-and-sum-every-field task,
@@ -390,7 +418,7 @@ and [`bench/BENCHFENCE.md`](bench/BENCHFENCE.md) documents what it did.
 
 ## Roadmap — all done
 
-Everything the design set out to do is built and measured (see [Status](#status--complete-v031)):
+Everything the design set out to do is built and measured (see [Status](#status--complete-v040)):
 
 - [x] SIMD structural-scan fast path (`@Vector`, portable prefix-XOR)
 - [x] Inlined push/callback API to cut per-field dispatch overhead
@@ -421,6 +449,21 @@ further work is speed, not surface. Multi-core parsing shipped in v0.4 because a
 workload (zarbor) asked for it; what remains — trimming field-delivery overhead (the
 gap to the scan ceiling) and parallel *streaming* — is not planned. zsift is done until
 a real workload asks again.
+
+Why each stays out:
+- **Parallel streaming** — nothing needs it: known-size input already loads and parses
+  multi-core (`parallel.parseReader`, up to 1 GiB), and zarbor, the only consumer,
+  loads whole files and is bound by its own per-field work. If a workload ever asks,
+  the sketch is: a reader thread counts each window's quotes (`parallel.countQuotes`)
+  and carries the parity forward, so every worker knows exactly where its first record
+  starts; a sample of the first rows sets the window size, windows grow when a record
+  does not fit, up to a cap (then error or serial); the serial `streamReader` is the
+  oracle. First question to measure: does the counting thread keep up with the reader?
+- **Lenient quoting on the SIMD path** — the scalar `Parser` already is the lenient
+  path, and a per-field quote count was measured at 5–14% (push) and ~35% (pull).
+- **Writing, dialects, encodings, other formats** (JSON, Parquet, Excel) — each is a
+  different bottleneck (JSON: its own quote-tracking parser; Parquet: decompression and
+  column decoding; Excel: unzip and XML) and would be a new project, not a zsift feature.
 
 ## License
 
