@@ -7,7 +7,7 @@ choice is measured, not guessed. zsift offers a lenient scalar parser, a vectori
 (SIMD) fast path, a streaming reader with bounded memory, and an auto-selecting
 facade that picks slurp-vs-stream by size.
 
-## Status — complete (v0.3.1)
+## Status — complete (v0.4.0)
 
 zsift set out to answer one question: **can you build a faster CSV parser in Zig?**
 The answer is yes. On a parse-every-field task it measured ~2.1–2.85× a purpose-built SIMD
@@ -16,7 +16,18 @@ opt-in [typed layers](#typed-layers) it still beats `rust-csv`'s serde path (~1.
 fenced) on the same deserialize-into-structs task — and it stays correct and fast on
 real messy data (validated against the Titanic dataset: exact survivor/missing-value
 counts through quoted commas and blank cells). That question is answered, so this is
-**feature-complete and parked** — not abandoned, done. **Next: v0.4 multi-core parsing is planned** — see [ROADMAP-v0.4.md](ROADMAP-v0.4.md), which also records a silent-misparse bug on the SIMD path (a stray mid-field quote) that it fixes first. It is deliberately not chasing
+**feature-complete and parked** — not abandoned, done.
+
+**v0.4 answered the follow-up — can it use every core? Yes.** `zsift.parallel` splits
+one input at exact record starts (a quote-count prefix, no speculation) and parses the
+ranges on the caller's `std.Io`: **2.9–3.6× serial push** on 18–45 MB real files with 12
+workers (5–6.8 GB/s on an i7-1365U under WSL2), with typed rows and records in parallel
+too. It now loads zarbor's training data **1.5–1.7× faster than zarbor's own all-core
+loader**, byte-identically. v0.4 also made the strict paths honest: a stray quote in an
+unquoted field used to merge every following field silently; it is now an
+`InvalidQuote` error. How it was built and measured: [ROADMAP-v0.4.md](ROADMAP-v0.4.md).
+
+It is deliberately not chasing
 feature-parity with full CSV toolkits (writers, dialects, a CLI); mature options
 already fill that space. Bug fixes welcome; scope expansion is out of scope by design.
 
@@ -248,11 +259,12 @@ facade). Source is grouped into `src/core/` (the parser + typed layers),
 | `core/header.zig` | ~55  | zero-alloc name→column view over a header record |
 | `core/reader.zig` | ~120 | `reader(T)` / `readerWide(T, n)` — opt-in typed struct rows over `SimdParser` |
 | `core/record.zig` | ~50  | ergonomic borrowed `Record` view (`.at` / `.get` / `.as` / `.count`) |
+| `core/parallel.zig` | ~310 | multi-core: exact record split (`countQuotes`, `recordStartAfter`), `forEachField[Exact]`, `forEachRow`, `forEachRecord`, `parseReader` over `std.Io` (v0.4) |
 | `csv.zig`         | ~70  | public API facade — re-exports only |
 
 Tests live in `src/test/` (`csv_test.zig` / `simd_test.zig` / `stream_test.zig` /
 `options_test.zig` / `convert_test.zig` / `header_test.zig` (+ `Record`) /
-`reader_test.zig`; the leaf modules `types` / `scalar` are covered by `csv_test.zig`
+`reader_test.zig` / `strict_test.zig` / `parallel_test.zig`; the leaf modules `types` / `scalar` are covered by `csv_test.zig`
 and `options_test.zig`) and are pulled into `zig build test` from `csv.zig`.
 
 ## How the SIMD path works
@@ -299,6 +311,16 @@ Which technique wins at each stage — detect an escape, collapse it, chunk widt
 delivery shape — was chosen by a reproducible bake-off, not by guessing: `zig build
 experiment` runs the whole grid on generated light/heavy corpora, and
 [EXPERIMENTS.md](EXPERIMENTS.md) records the method and what won.
+
+**Multi-core (v0.4), measured 2026-09-29** with `zig build compare` / `sweep` on an
+i7-1365U under WSL2 (12 logical CPUs), on real files:
+- `parallel.forEachField` vs serial push: **2.9–3.6×** on 18–45 MB files (worst round
+  ≥ 2.35×); serial, so ~1.0×, below 2 MiB, where starting workers costs more than it
+  saves (the sweep's crossover for a cheap sink).
+- A sink that does real per-field work gains much sooner: zarbor's loader splits at
+  64 KiB per worker via `forEachFieldExact` and wins on every file from 0.7 MB up.
+- Strict quote validation costs nothing on chunks without quotes and ~3–7% on a file
+  whose chunks are 70% quoted.
 
 For cross-library comparisons — against Rust's common `BurntSushi/rust-csv` and the
 specialist SIMD-C `liquidaty/zsv` (same bytes, matched task, fenced with the now-retired
@@ -386,14 +408,19 @@ Everything the design set out to do is built and measured (see [Status](#status-
       benchmarked head-to-head against rust-csv and zsv (`bench/vs-csv-parsers/`)
 - [x] Opt-in typed layers (v0.3.0): `Field.as(T)` / `trimmed`, `Header`, `reader(T)`,
       `Record` — zero cost when unused, raw scan untouched
+- [x] Strict paths reject bad quoting (`InvalidQuote`) instead of merging fields (v0.4)
+- [x] Multi-core parsing at exact record boundaries: push, typed rows, records and a
+      reader facade on `std.Io`, worker count by measured size rule (v0.4)
+- [x] Differential `verify` + alternating `compare` / `sweep` in place of benchfence (v0.4)
 
 **Scope is intentionally closed** (see [What it is](#what-it-is--a-speedster-not-an-all-purpose-library)):
 dialect features — comment lines, per-column rules, encodings, writing — are *out of
 scope*, not backlog. (Trimming and typed deserialization shipped in v0.3.0 as opt-in
 layers over the borrowed fields, precisely because they cost nothing on the raw path.) The only conceivable
-further work is speed, not surface — trimming field-delivery overhead (the remaining
-gap to the scan ceiling) and multi-core parsing at safe record boundaries — and
-neither is planned. zsift is done until a real workload asks for one.
+further work is speed, not surface. Multi-core parsing shipped in v0.4 because a real
+workload (zarbor) asked for it; what remains — trimming field-delivery overhead (the
+gap to the scan ceiling) and parallel *streaming* — is not planned. zsift is done until
+a real workload asks again.
 
 ## License
 

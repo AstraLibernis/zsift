@@ -105,3 +105,13 @@ regression on the common unquoted case.
 - **Correctness first.** Every "correct" cell is checked byte-for-byte against the
   scalar parser over the whole corpus, and the fast paths carry a 400-case
   differential fuzz (`src/simd_test.zig`).
+
+## v0.4: when multi-core pays (2026-09-29)
+`zig build sweep -- <file>` races serial push against 2–12 workers on record-aligned
+prefixes of a real file, alternating within rounds. With a cheap sink, every worker
+count lost below 1 MiB; at 2 MiB ~340 KiB per worker won on both files tried
+(1.39–1.43×); at 4 MiB ~512 KiB beat ~340 KiB — hence `parallel.forEachField`'s
+2 MiB / 384 KiB rule. A sink doing real work per field moves the crossover far down:
+zarbor's loader wins at 64 KiB per worker (swept 32–256 KiB). One measurement trap:
+per-worker sinks packed in one array made 12 workers *slower* than one (false
+sharing); aligned to cache lines, the same run was 2.6–3.4× faster than serial.

@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0–M6 done (2026-09-29); M7 (release) next.** v0.3.1 is the current release. This page is the plan for
+**Status: complete — released as v0.4.0 (2026-09-29).** All milestones M0–M7 done. v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -193,6 +193,12 @@ an adversarial case (`seconds_mark_in_coordinates`).
   (This milestone lands in the zarbor repo.)
 
 ### M7 — Release v0.4.0
+
+> ✅ **Done 2026-09-29.** README Status, Numbers, layout and roadmap updated with
+> `compare`/`sweep` ratios; `build.zig.zon` 0.4.0; tag `v0.4.0`. Final check: 96 tests
+> (Debug; ReleaseSafe skips one Windows-only test), `verify` on 28 adversarial, 7
+> private and 214 public files — all pass except the public file with a real stray
+> quote, which the strict paths reject by design.
 - README Status, EXPERIMENTS.md and bench tables updated with `compare` ratios; tag v0.4.0.
 
 ## Out of scope for v0.4
