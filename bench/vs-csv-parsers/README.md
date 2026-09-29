@@ -46,7 +46,7 @@ absolute MB/s as machine-specific. See caveats.
   - rust `byterecord` (`csv::Reader` + reused `ByteRecord`, the common high-level fast
     path) and `core` (`csv_core`, the no_std scalar DFA — rust's low-level floor);
   - zsv (`zsv_new` + per-row handler + `zsv_get_cell`), built `-O3 -march=native -mavx2`.
-- **Fenced.** Every sample runs under [benchfence](https://codeberg.org/AstraLibernis/benchfence)
+- **Fenced.** Every sample runs under benchfence (vendored as [`bench/benchfence`](../benchfence))
   `--bound mem` (a CSV parser is memory-bound): pinned to a quiet physical core, each
   measurement gated — the core must be at its idle baseline before the sample and stay
   quiet through it, or the sample is discarded and retaken. Headline = **`best_trusted`**:

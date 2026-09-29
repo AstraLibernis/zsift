@@ -1,8 +1,9 @@
 benchfence 0.4.0-dev
 commit:  497fce0
-source:  https://codeberg.org/AstraLibernis/benchfence
+source:  lost. Projects were migrated from Codeberg to GitHub on 2026-09-29 because of
+         Codeberg's anti-AI rules; benchfence's source did not survive the move.
 built:   zig build release (static musl x86_64), stripped (~914K)
 
 This is a vendored copy of the benchfence fencing engine — a single self-contained binary,
 not a source tree. It records the exact fencer used to produce this repo's bench-results.
-To refresh: rebuild benchfence at a newer commit, strip, replace this file, update this stamp.
+This binary is the only surviving copy: it cannot be rebuilt or refreshed.
