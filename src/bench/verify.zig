@@ -20,6 +20,7 @@ const cases = @import("cases.zig");
 const MemReader = @import("memreader.zig").MemReader;
 
 const Allocator = std.mem.Allocator;
+const max_split = 64;
 const Io = std.Io;
 const print = std.debug.print;
 
@@ -104,6 +105,23 @@ pub fn outcome(comptime C: type, p: Path, text: []const u8) Outcome {
 }
 
 pub const Verdict = struct { pass: bool, why: []const u8 };
+
+/// Split check: for several worker counts, `parallel.splitRecords` then the push path
+/// over each range in order must reproduce the whole-file push digest. Returns the
+/// first worker count that does not, or null when all do.
+fn splitMismatch(text: []const u8, want: Outcome, scratch: []u8) ?usize {
+    const cpus = std.Thread.getCpuCount() catch 4;
+    for ([_]usize{ 2, 3, 4, cpus, 16, max_split }) |n| {
+        var bounds: [max_split + 1]usize = undefined;
+        csv.parallel.splitRecords(text, .{}, bounds[0 .. n + 1]) catch return n;
+        var d = Digest{};
+        for (bounds[0..n], bounds[1 .. n + 1]) |a, b| {
+            csv.simd.forEachField(text[a..b], scratch, .{}, &d, Digest.on) catch return n;
+        }
+        if (!d.done().eql(want)) return n;
+    }
+    return null;
+}
 
 fn judge(expect: cases.Expect, o: [4]Outcome) Verdict {
     switch (expect) {
@@ -216,17 +234,21 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
                 runPush(csv, text, scratch),
                 runStream(csv, text, window, stream_scratch),
             };
-            const v = judge(expect, o);
+            var v = judge(expect, o);
+            // Whole-file agreement is a precondition for the split check to mean anything.
+            const split_bad: ?usize = if (expect == .agree and o[2].err == null) splitMismatch(text, o[2], scratch) else null;
+            if (v.pass and split_bad != null) v = .{ .pass = false, .why = "split" };
             if (!v.pass) n_fail += 1;
             print("{s:<5} {s:<12} {s}", .{ if (v.pass) "PASS" else "FAIL", @tagName(expect), file });
             if (!v.pass) print("   ({s} differs)", .{v.why});
+            if (split_bad) |n| print("   (split into {d} ranges does not reproduce the file)", .{n});
             print("\n", .{});
             if (!v.pass) for (o, path_names) |x, name| {
                 if (x.err) |e| print("        {s:<7} error {s}\n", .{ name, e }) else print("        {s:<7} {d} records, {d} fields, digest {x:0>16}\n", .{ name, x.records, x.fields, x.digest });
             };
 
             if (n_files > 0) try report.append(alloc, ',');
-            try report.print(alloc, "{{\"file\":\"{s}\",\"bytes\":{d},\"expect\":\"{s}\",\"pass\":{},\"paths\":{{", .{ file, text.len, @tagName(expect), v.pass });
+            try report.print(alloc, "{{\"file\":\"{s}\",\"bytes\":{d},\"expect\":\"{s}\",\"pass\":{},\"split_mismatch_n\":{?d},\"paths\":{{", .{ file, text.len, @tagName(expect), v.pass, split_bad });
             for (o, path_names, 0..) |x, name, k| {
                 if (k > 0) try report.append(alloc, ',');
                 if (x.err) |e| {

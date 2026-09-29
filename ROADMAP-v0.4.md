@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0, M1 done (2026-09-29); M2 next.** v0.3.1 is the current release. This page is the plan for
+**Status: M0–M2 done (2026-09-29); M3 next.** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -83,6 +83,16 @@ code.
   raw scan speed on the corpus stays within the alternating comparison's range of v0.3.1.
 
 ### M2 — Exact record boundaries in parallel
+
+> ✅ **Done 2026-09-29.** `zsift.parallel`: `countQuotes` (SIMD, per range) and
+> `recordStartAfter` (first record start after a cut, from its prefix quote parity;
+> CRLF never torn) are the two independent phases; `splitRecords` is their serial
+> reference. Oracle: parsing the ranges in order with the scalar `Parser` reproduces
+> the whole input's field sequence — checked for N = 1…16 over 40 random inputs
+> (quoted `\n`/`\r\n`/`\r`, escapes, long quoted fields), from every cut point of 12
+> more, and by `zig build verify` for N = 2, 3, 4, cores, 16, 64 on the adversarial and
+> private corpora. An odd quote total is `UnterminatedQuote`. Running the phases on
+> several cores is M3.
 - Split the input into N byte ranges. Each worker counts the quote bytes in its range
   (the existing quote mask plus popcount). A running total gives each range's true
   starting quote state, with no speculation. Each worker then finds its first record

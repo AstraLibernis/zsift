@@ -56,6 +56,9 @@ pub const SimdParser = simd.SimdParser;
 pub const classify = simd.classify;
 
 /// Streaming over a `std.Io.Reader` plus the auto-selecting facade. See `core/stream.zig`.
+/// Exact record boundaries for splitting one input across workers (v0.4).
+pub const parallel = @import("core/parallel.zig");
+
 pub const stream = @import("core/stream.zig");
 pub const streamReader = stream.streamReader;
 pub const parseReader = stream.parseReader;
@@ -72,4 +75,5 @@ test {
     _ = @import("test/header_test.zig");
     _ = @import("test/reader_test.zig");
     _ = @import("test/strict_test.zig");
+    _ = @import("test/parallel_test.zig");
 }
