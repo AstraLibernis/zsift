@@ -35,23 +35,6 @@ pub fn build(b: *std.Build) void {
     });
     bench_mod.addImport("csv", csv_mod);
 
-    // The single "vars" source for the benchmark tooling's default paths, injected at
-    // build time from the repo root (self-locating). Every path the `bench drive`
-    // subcommands resolve is `$ENV override → this default → loud error`; there are no
-    // hand-written absolute paths and no fake defaults. See src/bench/drive.zig.
-    const build_paths = b.addOptions();
-    build_paths.addOption([]const u8, "zsift_bench", b.pathFromRoot("zig-out/bin/bench"));
-    build_paths.addOption([]const u8, "benchfence", b.pathFromRoot("bench/benchfence"));
-    build_paths.addOption([]const u8, "corpus_dir", b.pathFromRoot("bench/vs-csv-parsers/corpus"));
-    build_paths.addOption([]const u8, "rcorpus_dir", b.pathFromRoot("bench/vs-csv-parsers/rcorpus"));
-    build_paths.addOption([]const u8, "rust_bench", b.pathFromRoot("bench/vs-csv-parsers/rustcsv/target/release/rustcsv-bench"));
-    build_paths.addOption([]const u8, "zsv_bench", b.pathFromRoot("bench/vs-csv-parsers/zsvbench"));
-    build_paths.addOption([]const u8, "results_structured", b.pathFromRoot("bench/vs-csv-parsers/results/structured.json"));
-    build_paths.addOption([]const u8, "results_comparison", b.pathFromRoot("bench/vs-csv-parsers/results/comparison-zsift-zsv-rust.json"));
-    build_paths.addOption([]const u8, "results_random", b.pathFromRoot("bench/vs-csv-parsers/results/random.json"));
-    build_paths.addOption([]const u8, "results_typed", b.pathFromRoot("bench/vs-csv-parsers/results/typed.json"));
-    bench_mod.addOptions("build_paths", build_paths);
-
     const bench = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
     b.installArtifact(bench);
 
@@ -80,15 +63,13 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_verify.addArgs(args);
     b.step("verify", "Differential check of every parser path: `zig build verify -- [files/dirs]`").dependOn(&run_verify.step);
 
-    // benchfence UNITS drivers (replace the former Nushell drivers). Each execs the
-    // vendored benchfence binary over `zig-out/bin/bench`, so they depend on the install.
-    addDriveStep(b, bench, "throughput", "throughput", "Benchmark every profile × parser path via benchfence");
-    addDriveStep(b, bench, "matrix", "matrix", "DETECT×COLLAPSE matrix over a corpus: `zig build matrix -- <corpus.csv>`");
-    addDriveStep(b, bench, "vs-rust", "vs-rust", "Compare zsift vs rust-csv over the structured corpora");
-    addDriveStep(b, bench, "vs-all", "vs-all", "Compare zsift vs zsv vs rust over structured + random corpora");
-    addDriveStep(b, bench, "vs-serde", "vs-serde", "Honest typed compare: zsift reader(T) vs rust-csv serde over typed.csv");
-    addDriveStep(b, bench, "random", "random", "Compare zsift vs rust-csv over the randomized corpora");
-    addDriveStep(b, bench, "baseline", "baseline", "Fenced baseline over $ZSIFT_TESTDATA (private corpus; results stay beside it)");
+    // `zig build compare -- [--rounds N] [--paths ..] [files]` — alternating comparison
+    // of the parser paths (replaced the retired benchfence drivers). Build with
+    // -Doptimize=ReleaseFast for meaningful numbers.
+    const run_compare = b.addRunArtifact(bench);
+    run_compare.addArg("compare");
+    if (b.args) |args| run_compare.addArgs(args);
+    b.step("compare", "Alternating comparison of parser paths: `zig build compare -Doptimize=ReleaseFast -- [files/dirs]`").dependOn(&run_compare.step);
 }
 
 /// A `bench gen <kind>` step. Forwards `-- <args>` (e.g. the output dir). Generators
@@ -97,15 +78,5 @@ fn addGenStep(b: *std.Build, bench: *std.Build.Step.Compile, kind: []const u8, s
     const run = b.addRunArtifact(bench);
     run.addArgs(&.{ "gen", kind });
     if (b.args) |args| run.addArgs(args);
-    b.step(step_name, desc).dependOn(&run.step);
-}
-
-/// A `bench drive <driver>` step. The units reference the INSTALLED `zig-out/bin/bench`
-/// (via build_paths.zsift_bench), so the run depends on the install step existing.
-fn addDriveStep(b: *std.Build, bench: *std.Build.Step.Compile, driver: []const u8, step_name: []const u8, desc: []const u8) void {
-    const run = b.addRunArtifact(bench);
-    run.addArgs(&.{ "drive", driver });
-    if (b.args) |args| run.addArgs(args);
-    run.step.dependOn(b.getInstallStep());
     b.step(step_name, desc).dependOn(&run.step);
 }

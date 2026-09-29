@@ -13,7 +13,7 @@ const std = @import("std");
 const csv = @import("csv");
 const methods = @import("methods.zig");
 const experiment = @import("experiment.zig");
-const drive = @import("drive.zig");
+const compare = @import("compare.zig");
 const gen = @import("gen.zig");
 const verify = @import("verify.zig");
 
@@ -260,62 +260,6 @@ fn measureScan(corpus: []const u8, runs: usize) f64 {
     return mb / secs;
 }
 
-/// The selectable measurement paths, one per column of the human table.
-const PathSel = enum { scalar, pull, push, stream, ceil, typed };
-
-fn parsePath(name: []const u8) ?PathSel {
-    inline for (.{ "scalar", "pull", "push", "stream", "ceil", "typed" }, std.enums.values(PathSel)) |n, v| {
-        if (std.mem.eql(u8, name, n)) return v;
-    }
-    return null;
-}
-
-fn parseProfile(name: []const u8) ?Profile {
-    for (profiles) |p| {
-        if (std.mem.eql(u8, std.mem.trimEnd(u8, p.name, " "), name)) return p;
-    }
-    return null;
-}
-
-/// Single (profile, path) measurement — the unit a benchfence driver gates and
-/// repeats. Each invocation does ONE best-of-`iters` measurement so the gate
-/// brackets a real measurement, then the driver picks best-across-reps.
-fn measureOne(alloc: std.mem.Allocator, prof: Profile, sel: PathSel) !f64 {
-    var scratch: [64 * 1024]u8 = undefined;
-    var window: [stream_window]u8 = undefined;
-    var stream_scratch: [stream_window]u8 = undefined;
-    // The typed path ignores the (headerless) synthetic profiles — it needs the typed
-    // corpus with a header, so it generates its own deterministic one.
-    if (sel == .typed) {
-        const tc = try gen.genTypedBytes(alloc);
-        defer alloc.free(tc);
-        return measureTyped(tc, &scratch, iters);
-    }
-    const corpus = try generate(alloc, prof);
-    defer alloc.free(corpus);
-    return switch (sel) {
-        .scalar => measure(csv.Parser, corpus, &scratch, iters),
-        .pull => measure(csv.SimdParser, corpus, &scratch, iters),
-        .push => measureCallback(corpus, &scratch, iters),
-        .stream => measureStream(corpus, &window, &stream_scratch, iters),
-        .ceil => measureScan(corpus, iters),
-        .typed => unreachable, // handled above
-    };
-}
-
-/// Measure a single path over an explicit corpus (used for a real $ZSIFT_CORPUS
-/// file, where the profile dimension is irrelevant — the file is what it is).
-fn measurePath(corpus: []const u8, sel: PathSel, scratch: []u8, window: []u8, stream_scratch: []u8) f64 {
-    return switch (sel) {
-        .scalar => measure(csv.Parser, corpus, scratch, iters),
-        .pull => measure(csv.SimdParser, corpus, scratch, iters),
-        .push => measureCallback(corpus, scratch, iters),
-        .stream => measureStream(corpus, window, stream_scratch, iters),
-        .ceil => measureScan(corpus, iters),
-        .typed => measureTyped(corpus, scratch, iters),
-    };
-}
-
 /// Load the real CSV corpus named by $ZSIFT_CORPUS, or null when unset. When
 /// present it replaces the synthetic profiles so the benchmark reflects
 /// real-world data (true field-length distribution, real quoting/escaping)
@@ -323,14 +267,6 @@ fn measurePath(corpus: []const u8, sel: PathSel, scratch: []u8, window: []u8, st
 fn envCorpus(init: std.process.Init, alloc: std.mem.Allocator) !?[]u8 {
     const path = init.environ_map.get("ZSIFT_CORPUS") orelse return null;
     return try std.Io.Dir.cwd().readFileAlloc(init.io, path, alloc, .unlimited);
-}
-
-/// Read a corpus CSV named EXPLICITLY as an argv argument. benchfence execs a unit's argv
-/// directly — no shell, no env, no $VAR — so a benchfence-driven run passes the corpus PATH as a
-/// trailing argument (`bench <profile> <path> <corpus.csv>` / `bench cell <d> <c> <corpus.csv>`)
-/// rather than via $ZSIFT_CORPUS. The argv path takes precedence over the env fallback.
-fn readCorpus(init: std.process.Init, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(init.io, path, alloc, .unlimited);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -345,10 +281,10 @@ pub fn main(init: std.process.Init) !void {
 
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
-    // `bench drive <name>` — benchfence UNITS drivers (throughput / matrix / vs-rust /
-    // vs-all / random). Replaces the former Nushell drivers. See `drive.zig`.
-    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "drive")) {
-        return drive.main(init, argv[2..]);
+    // `bench compare [--rounds N] [--paths ..] [files]` — alternating comparison of
+    // the parser paths over the same bytes (replaced benchfence). See `compare.zig`.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "compare")) {
+        return compare.main(init, argv[2..]);
     }
 
     // `bench verify [--out P] [paths]` — every parser path over the same bytes,
@@ -419,52 +355,6 @@ pub fn main(init: std.process.Init) !void {
             measureCallback(corpus, &d_scratch, iters),
             measureStream(corpus, &d_window, &d_stream_scratch, iters),
         });
-        return;
-    }
-
-    // `bench cell <detect> <collapse>` — single-shot ONE matrix cell over
-    // $ZSIFT_CORPUS, printing BENCHFENCE_METRIC for a benchfence driver to gate.
-    if (argv.len >= 4 and std.mem.eql(u8, argv[1], "cell")) {
-        // Corpus as a trailing argv arg (benchfence unit form) — else the $ZSIFT_CORPUS fallback.
-        const corpus = if (argv.len >= 5)
-            try readCorpus(init, alloc, argv[4])
-        else
-            real orelse {
-                print("cell mode needs a corpus: `bench cell <detect> <collapse> <corpus.csv>` (or $ZSIFT_CORPUS)\n", .{});
-                return error.NoCorpus;
-            };
-        const mbps = try methods.runCell(argv[2], argv[3], corpus, alloc);
-        print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
-        return;
-    }
-
-    // Single-shot mode for a benchfence driver: `bench <profile> <path>` runs ONE
-    // (profile, path) measurement and prints a machine-readable metric, so the
-    // driver controls iteration and gates each measurement (README "level 2").
-    // No args → the human table below (best-of-iters per cell, all paths).
-    if (argv.len >= 3) {
-        const sel = parsePath(argv[2]) orelse {
-            print("unknown path '{s}' (scalar|pull|push|stream|ceil|typed)\n", .{argv[2]});
-            return error.BadPath;
-        };
-        var ss_scratch: [64 * 1024]u8 = undefined;
-        var ss_window: [stream_window]u8 = undefined;
-        var ss_stream_scratch: [stream_window]u8 = undefined;
-        // A trailing argv corpus (`bench <profile> <path> <corpus.csv>`, the benchfence unit form)
-        // wins over $ZSIFT_CORPUS; with neither, fall back to the synthetic profile named by argv[1].
-        const argv_corpus: ?[]u8 = if (argv.len >= 4) try readCorpus(init, alloc, argv[3]) else null;
-        const corpus_bytes: ?[]const u8 = argv_corpus orelse real;
-        const mbps = if (corpus_bytes) |corpus|
-            measurePath(corpus, sel, &ss_scratch, &ss_window, &ss_stream_scratch)
-        else blk: {
-            const prof = parseProfile(argv[1]) orelse {
-                print("unknown profile '{s}' (clean|quoted|escapey)\n", .{argv[1]});
-                return error.BadProfile;
-            };
-            break :blk try measureOne(alloc, prof, sel);
-        };
-        // The one line benchfence reads (last BENCHFENCE_METRIC= wins).
-        print("BENCHFENCE_METRIC={d:.1}\n", .{mbps});
         return;
     }
 

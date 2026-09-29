@@ -267,23 +267,6 @@ fn measure(comptime d: Detect, comptime c: Collapse, corpus: []const u8, scratch
     return mb / (@as(f64, @floatFromInt(best)) / 1e9);
 }
 
-/// Single-shot measurement of ONE cell (for a benchfence driver): runs
-/// (detect, collapse) over the whole corpus once (best of `reps`) and returns
-/// MB/s. Names match the enum tags (e.g. "accum", "memcpy").
-pub fn runCell(detect_name: []const u8, collapse_name: []const u8, corpus: []const u8, alloc: std.mem.Allocator) !f64 {
-    const scratch = try alloc.alloc(u8, corpus.len + 64);
-    defer alloc.free(scratch);
-    const mb = @as(f64, @floatFromInt(corpus.len)) / (1024.0 * 1024.0);
-    inline for (.{ Detect.none, Detect.rescan, Detect.swar, Detect.accum }) |d| {
-        if (std.mem.eql(u8, detect_name, @tagName(d))) {
-            inline for (.{ Collapse.none, Collapse.byteloop, Collapse.memcpy, Collapse.swarcpy, Collapse.mask }) |c| {
-                if (std.mem.eql(u8, collapse_name, @tagName(c))) return measure(d, c, corpus, scratch, mb);
-            }
-        }
-    }
-    return error.UnknownCell;
-}
-
 // --- Campaign axis: classifier chunk width (32 / 64 / 128-byte vectors) ---
 // A width-generic version of the classifier + the shipped accum/swarcpy parse, so
 // we can measure whether native 32-byte AVX2 beats the 64-byte emulation (or 128).

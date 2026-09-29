@@ -6,6 +6,12 @@
 > works, but it can no longer be fixed, rebuilt, or ported. This page records what it does,
 > so the design survives even though the code did not. — AstraLibernis
 
+**Retired 2026-09-29.** zsift no longer runs benchfence. Without source it can't be
+debugged or fixed, and on WSL it rejected most samples (the cores rarely read as idle), so
+v0.4 measures with an in-repo alternating comparison instead (`zig build compare`, see the
+README's "Measuring" section). The binary stays here as the record of how the v0.1–v0.3.1
+numbers were made.
+
 Everything below was read from the binary itself (`--help`, `--probe`, its embedded strings,
 and one short gated run on 2026-09-29), plus how zsift drives it (`src/bench/drive.zig`).
 The exact build is in [`benchfence.version`](benchfence.version): 0.4.0-dev, commit `497fce0`,
@@ -65,9 +71,9 @@ never misread.
 
 Each unit needs exactly `name` and `argv`. Its command runs once per sample and must print
 `BENCHFENCE_METRIC=<number>` (stdout or stderr, a bare number) and exit.
-zsift's `bench drive <name>` builds this list and calls benchfence with `--units`,
-`--bound`, `--wait`, `--reps`, `--metric` and `--direction` (`src/bench/drive.zig`); the
-binary is found through `$BENCHFENCE`, else this vendored copy, else a loud error.
+Up to v0.3.1, zsift's `bench drive <name>` built this list and called benchfence with
+`--units`, `--bound`, `--wait`, `--reps`, `--metric` and `--direction` (`src/bench/drive.zig`,
+removed at retirement; see tag v0.3.1).
 
 ## Other modes
 

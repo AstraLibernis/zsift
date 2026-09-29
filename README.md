@@ -291,37 +291,36 @@ experiment` runs the whole grid on generated light/heavy corpora, and
 [EXPERIMENTS.md](EXPERIMENTS.md) records the method and what won.
 
 For cross-library comparisons — against Rust's common `BurntSushi/rust-csv` and the
-specialist SIMD-C `liquidaty/zsv` (same bytes, matched task, fenced) — see
-[bench/vs-csv-parsers/](bench/vs-csv-parsers/).
+specialist SIMD-C `liquidaty/zsv` (same bytes, matched task, fenced with the now-retired
+benchfence; reproducible at tag v0.3.1) — see [bench/vs-csv-parsers/](bench/vs-csv-parsers/).
 
-## Trustworthy benchmarking
+## Measuring
 
-This is a shared Hyper-V VM; the host steals CPU unpredictably, so `zig build
-bench` swings 30%+ between identical runs. Gate each sample through benchfence:
+This is a shared VM (WSL2 / Hyper-V); the host steals CPU unpredictably, so a single
+absolute MB/s swings 30%+ between identical runs. zsift therefore measures **ratios under
+shared noise**, and checks correctness before it times anything:
 
 ```sh
-zig build -Doptimize=ReleaseFast
-zig build throughput -- --reps 20
+zig build verify -- <files or dirs>                           # every path agrees with the scalar oracle
+zig build compare -Doptimize=ReleaseFast -- <files or dirs>   # alternating comparison
 ```
 
-`zig build throughput` runs the in-binary benchfence **units** driver (`bench drive throughput`,
-in `src/bench/drive.zig`): it builds a `[{name, argv}]` unit list and hands
-it to the vendored `bench/benchfence` binary, which OWNS the gate → measure → postcheck → retry
-loop. benchfence pins each unit to a quiet physical core, disables ASLR, sets `LC_ALL=C`, quiets
-the desktop, and — before AND after every sample — proves the core is back at its idle speed,
-discarding and re-measuring any sample the machine spoiled mid-flight. That is *per-sample* trust
-("level 2"). A unit's `best_trusted` is the best of only the gate-passed samples; a uniformly-busy
-machine reads stable-but-slow, so the gate compares against the venue's measured floor, not just
-pre-vs-post. zsift is a CSV parser — memory-bound — so the driver gates on the **mem referee**
-(`--bound mem`): the CPU referee is blind to the DRAM-bandwidth contention that actually slows it.
+`compare` (`src/bench/compare.zig`) times one full pass of every parser path per round,
+rotating which goes first, for N rounds (`--rounds`, default 15, after one warm-up). All
+contenders see the same moment's contention, so the per-round speed ratio is stable even
+when absolute MB/s is not. It reports each path's median MB/s with its range, and the
+median ratio against the first path with its min–max; every sample is saved as JSON. It
+refuses to time paths whose output differs. `verify` (`src/bench/verify.zig`) runs the
+scalar parser (the oracle), pull, push and stream over the same bytes and judges each
+file; `zig build gen-adversarial -- <dir>` writes the edge-case corpus it is designed for.
+With no paths, both use `$ZSIFT_TESTDATA` (a private real-world corpus kept outside the
+repo) and write their reports beside it; unset, they say SKIPPED rather than pass.
 
-benchfence is vendored as a single static binary at [`bench/benchfence`](bench/benchfence)
-(~900 KB; see [`bench/benchfence.version`](bench/benchfence.version) for the exact build). Nothing
-to install or build — it ships with the repo. It is also the only surviving copy: this project moved
-from Codeberg to GitHub (2026-09-29) because of Codeberg's anti-AI rules, and benchfence's source
-was lost in the move. What it does is written up in [`bench/BENCHFENCE.md`](bench/BENCHFENCE.md). Override it with `$BENCHFENCE` if you want a
-different one; if neither the override nor the vendored binary exists, the driver fails loudly
-rather than running unfenced.
+**benchfence is retired** (2026-09-29). Numbers up to v0.3.1 were gated with it; it is no
+longer used by anything here. Its source was lost when this project moved from Codeberg
+to GitHub because of Codeberg's anti-AI rules; the stripped binary is kept at
+[`bench/benchfence`](bench/benchfence) only as the record of how those numbers were made,
+and [`bench/BENCHFENCE.md`](bench/BENCHFENCE.md) documents what it did.
 
 ## Prior art surveyed (2026-06-30)
 

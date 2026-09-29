@@ -214,8 +214,8 @@ pub fn runExperiment(alloc: std.mem.Allocator) !void {
         \\escaped "") -> FIX (collapse "") -> DELIVER. Below is a bake-off at each
         \\station, on two self-generated corpora: LIGHT (~5% of fields escaped) and
         \\HEAVY (~60%). Numbers are best-of-{d} MB/s and are MACHINE-SPECIFIC and
-        \\contention-sensitive on a shared box — for trustworthy numbers run the cells
-        \\under benchfence (`zig build matrix -- <corpus.csv>`). The winners are what zsift ships.
+        \\contention-sensitive on a shared box: read the ordering, not the absolute
+        \\numbers (see README "Measuring"). The winners are what zsift ships.
         \\
         \\
     , .{reps});

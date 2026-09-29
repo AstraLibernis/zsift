@@ -25,13 +25,13 @@ const print = std.debug.print;
 
 const window_len = 64 * 1024;
 
-const Outcome = struct {
+pub const Outcome = struct {
     digest: u64 = 0,
     fields: u64 = 0,
     records: u64 = 0,
     err: ?[]const u8 = null,
 
-    fn eql(a: Outcome, b: Outcome) bool {
+    pub fn eql(a: Outcome, b: Outcome) bool {
         if (a.err != null or b.err != null) {
             return a.err != null and b.err != null and std.mem.eql(u8, a.err.?, b.err.?);
         }
@@ -60,6 +60,7 @@ const Digest = struct {
     }
 };
 
+pub const Path = enum { scalar, pull, push, stream };
 const path_names = [_][]const u8{ "scalar", "pull", "push", "stream" };
 
 fn runPull(comptime P: type, text: []const u8, scratch: []u8) Outcome {
@@ -83,6 +84,22 @@ fn runStream(text: []const u8, window: []u8, scratch: []u8) Outcome {
     var mr = MemReader.init(window, text);
     csv.streamReader(&mr.interface, scratch, .{}, &d, Digest.on) catch |e| return .{ .err = @errorName(e) };
     return d.done();
+}
+
+/// One path's outcome over `text`, with buffers of its own (for `bench compare`).
+/// Single-threaded use only: the buffers are static.
+pub fn outcome(p: Path, text: []const u8) Outcome {
+    const B = struct {
+        var scratch: [1 << 20]u8 = undefined;
+        var window: [window_len]u8 = undefined;
+        var stream_scratch: [window_len]u8 = undefined;
+    };
+    return switch (p) {
+        .scalar => runPull(csv.Parser, text, &B.scratch),
+        .pull => runPull(csv.SimdParser, text, &B.scratch),
+        .push => runPush(text, &B.scratch),
+        .stream => runStream(text, &B.window, &B.stream_scratch),
+    };
 }
 
 pub const Verdict = struct { pass: bool, why: []const u8 };

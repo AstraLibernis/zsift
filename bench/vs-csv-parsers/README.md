@@ -1,5 +1,10 @@
 # zsift vs other CSV parsers — head-to-head parse throughput
 
+> **Historical record (v0.1.1–v0.3.1).** These runs were driven through benchfence, which
+> was retired on 2026-09-29, and the `zig build vs-*` / `random` drivers were removed with
+> it. To re-run them exactly as recorded, check out tag `v0.3.1`. The Rust and C harness
+> sources and the raw results stay here as the record.
+
 Where zsift stands against two reference points, recorded 2026-07-07:
 
 - **[`BurntSushi/rust-csv`](https://github.com/BurntSushi/rust-csv)** — the *common*
@@ -134,13 +139,13 @@ zig build -Doptimize=ReleaseFast                          # zsift
 zig build gen-structured -- bench/vs-csv-parsers/corpus     # clean / quoted / escapey
 zig build gen-random     -- bench/vs-csv-parsers/rcorpus 4  # rand0..rand3 + meta.json
 
-# fenced runs (the fencer is the vendored bench/benchfence binary; no setup needed)
+# fenced runs (at tag v0.3.1 only; the drivers were removed with benchfence)
 zig build vs-all  -- --reps 12    # three-way (zsift/zsv/rust), structured + random
 zig build vs-rust -- --reps 15    # zsift vs rust, structured
 zig build random  -- --reps 12    # zsift vs rust, random
 ```
 
-These are the `bench drive` subcommands (`src/bench/drive.zig`). Each builds a
+At v0.3.1 these were the `bench drive` subcommands (`src/bench/drive.zig`). Each built a
 `[{name, argv}]` unit list and hands it to `bench/benchfence`, which owns the
 gate → measure → retry loop and applies the fence itself (so the units carry no `taskset`).
 The corpus path is each unit's trailing argv argument — there is no `$ZSIFT_CORPUS` to set.

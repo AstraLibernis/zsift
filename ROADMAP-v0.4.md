@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: planned, not started.** v0.3.1 is the current release. This page is the plan for
+**Status: M0 done (2026-09-29); M1 next.** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -24,7 +24,8 @@ loader, most of the time is spent converting fields (float parsing, dictionary l
 so the bigger win is running the *caller's* per-field work on every core.
 
 **Target:** a zsift-based load that is byte-identical to zarbor's and beats zarbor's
-all-core load, fenced with benchfence. If it does not beat it, it does not ship.
+all-core load in an alternating comparison (median ratio with its min–max, over many
+rounds). If it does not beat it, it does not ship.
 
 ## Accuracy first: a bug found while planning
 
@@ -44,6 +45,12 @@ for lenient input, serial `forEachField` for strict input), not a re-derivation 
 code.
 
 ### M0 — Corpus and baseline
+
+> ✅ **Done 2026-09-29.** Adversarial corpus: 19 cases, 16 pass; the 3 failures are M1's
+> bugs (stray quotes merge records silently on every strict path; text after a closing
+> quote reports `UnterminatedQuote` instead of `InvalidQuote`). Private corpus: all 4
+> paths agree on every file. Alternating comparison saved for every file: push runs
+> 2.5–2.9× the scalar parser (median per file), stream 2.0–2.2×.
 - `$ZSIFT_TESTDATA` points at a private real-world corpus. No default: unset means those
   tests and benches **skip loudly**, never pass silently. The data never enters the repo.
 - A generated adversarial corpus, committed as a generator (not data): quoted newlines,
@@ -51,7 +58,10 @@ code.
   a stray mid-field quote, an unterminated quote at EOF, one huge record, empty input.
 - A comparison bench (serial zsift vs the zarbor-equivalent load) that verifies
   identical output before timing and saves every sample to JSON after each mode.
-- **Done when:** baseline results for every corpus file are saved, fenced with benchfence.
+- **Done when:** `verify` and `compare` results for every corpus file are saved.
+- **Measurement:** benchfence was tried for the baseline and retired (no source to fix;
+  on WSL it rejected most samples). Every speed claim in v0.4 is a ratio from
+  `zig build compare`: paths alternate within each round, so they share the noise.
 
 ### M1 — Strict path never misparses silently
 - A stray quote inside an unquoted field is an error on the SIMD path (`InvalidQuote` or
@@ -59,7 +69,7 @@ code.
   wherever it opened.
 - **Done when:** every adversarial file either parses identically to the scalar `Parser`
   or fails with a named error, on `SimdParser`, `forEachField` and `streamReader`; the
-  raw scan speed on the clean corpus stays within noise of v0.3.1 (fenced).
+  raw scan speed on the corpus stays within the alternating comparison's range of v0.3.1.
 
 ### M2 — Exact record boundaries in parallel
 - Split the input into N byte ranges. Each worker counts the quote bytes in its range
@@ -87,7 +97,7 @@ code.
   switch stays available as the control arm.
 - `parseReader`'s slurp path uses it; streaming stays serial in v0.4.
 - **Done when:** the sweep is saved, and the chosen threshold is never slower than
-  serial on the corpus (fenced).
+  serial on the corpus (alternating comparison).
 
 ### M5 — Typed layers in parallel
 - `reader(T)` and `Record` per range, with the `Header` captured once from range 0.
@@ -102,11 +112,12 @@ code.
 - zarbor tolerates stray mid-field quotes today, so it keeps a lenient fallback to the
   scalar `Parser` when M1's error fires.
 - **Done when:** zarbor's tables are byte-identical to today's on every corpus file
-  without those bugs, and its fenced load time beats today's all-core `readCsv`.
+  without those bugs, and its load time beats today's all-core `readCsv` (median ratio
+  and its min above 1.0 in an alternating comparison).
   (This milestone lands in the zarbor repo.)
 
 ### M7 — Release v0.4.0
-- README Status, EXPERIMENTS.md and bench tables updated with fenced numbers; tag v0.4.0.
+- README Status, EXPERIMENTS.md and bench tables updated with `compare` ratios; tag v0.4.0.
 
 ## Out of scope for v0.4
 
