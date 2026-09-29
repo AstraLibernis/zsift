@@ -7,7 +7,7 @@ choice is measured, not guessed. zsift offers a lenient scalar parser, a vectori
 (SIMD) fast path, a streaming reader with bounded memory, and an auto-selecting
 facade that picks slurp-vs-stream by size.
 
-## Status — complete (v0.3.0)
+## Status — complete (v0.3.1)
 
 zsift set out to answer one question: **can you build a faster CSV parser in Zig?**
 The answer is yes. On a parse-every-field task it measured ~2.1–2.85× a purpose-built SIMD
@@ -359,7 +359,7 @@ rather than running unfenced.
 
 ## Roadmap — all done
 
-Everything the design set out to do is built and measured (see [Status](#status--complete-v030)):
+Everything the design set out to do is built and measured (see [Status](#status--complete-v031)):
 
 - [x] SIMD structural-scan fast path (`@Vector`, portable prefix-XOR)
 - [x] Inlined push/callback API to cut per-field dispatch overhead
