@@ -159,6 +159,9 @@ fn splitParallel(io: std.Io, input: []const u8, opts: Options, n: usize, bounds:
 
 /// `forEachFieldExact` on as many of the given workers as the input keeps busy
 /// (`workersFor`): small inputs run serially on `ctxs[0]`; unused sinks get nothing.
+/// The rule is tuned for a cheap sink; one doing real work per field (parsing floats,
+/// building dictionaries) gains from far smaller ranges, so pick its worker count with
+/// `forEachFieldExact` (zarbor's loader measured 64 KiB per worker).
 pub fn forEachField(
     io: std.Io,
     input: []const u8,

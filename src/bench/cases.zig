@@ -40,6 +40,9 @@ const fixed = [_]Case{
     .{ .name = "broken_escape_pair", .bytes = "a\n\"a\"b\"c\"\n", .expect = .agree },
     .{ .name = "quote_reopened_at_eof", .bytes = "a\n\"a\"b\"", .expect = .strict_error },
     .{ .name = "lone_quote_eof_unquoted", .bytes = "a,b\"", .expect = .strict_error },
+    // Real data does this: a seconds/inch mark in an unquoted field (coordinates,
+    // screen sizes). Not RFC 4180; the lenient scalar parser keeps it as text.
+    .{ .name = "seconds_mark_in_coordinates", .bytes = "phone,location,city\n555,37 36'37.8\"N 121 2'17.9\"W,Modesto\n", .expect = .strict_error },
     .{ .name = "stray_then_real_quoted", .bytes = "id,x\n1,3\" pipe\n2,\"q\"\n3,z\n", .expect = .strict_error },
 };
 

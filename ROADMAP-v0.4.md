@@ -1,6 +1,6 @@
 # zsift v0.4 — multi-core parsing (plan)
 
-**Status: M0–M5 done (2026-09-29); M6 next (in the zarbor repo).** v0.3.1 is the current release. This page is the plan for
+**Status: M0–M6 done (2026-09-29); M7 (release) next.** v0.3.1 is the current release. This page is the plan for
 the one piece of further work the README named: "multi-core parsing at safe record
 boundaries … done until a real workload asks for one." A real workload has asked:
 **zarbor**'s model training, the largest consumer of CSV data in these projects.
@@ -158,6 +158,28 @@ code.
 - **Done when:** typed rows equal the serial `reader(T)` rows on the corpus.
 
 ### M6 — The real workload: zarbor
+
+> ✅ **Done 2026-09-29** (zarbor `e48666f`). zsift is vendored under zarbor's
+> `src/vendor/zsift/` (zarbor stays dependency-free). zarbor's `readCsv` splits rows
+> with zsift on up to one range per pool thread; each range keeps its own columns and
+> dictionaries, merged in file order so level ids stay first-appearance. The three
+> loader bugs are fixed, each with a test; a stray quote falls back to the lenient
+> scalar parser. Against the previous loader (same process, alternating): the 7
+> private files load **byte-identically** and **1.52–1.70×** faster than its all-core
+> load (worst round 1.29×); the public csv-spectrum + W3C CSVW suites load identically
+> except the 6 files that hit the old bugs, which now match the suites' expected
+> output; a real training run gives the same AUC/logloss. Lesson for zsift: M4's
+> 2 MiB rule is right for a cheap sink, but zarbor's sink (float parsing, dictionaries)
+> was *slower* than the old loader under it (0.78–0.83× on files < 2 MiB); sized with
+> `forEachFieldExact` at 64 KiB per worker (swept 32–256 KiB) it won on every file.
+
+**Public test suites (added 2026-09-29).** Hand-built corpora only contain the cases
+their author thought of, so `zig build verify` was also run on two public suites
+cloned outside the repo: csv-spectrum (12 cases with expected JSON) and the W3C CSVW
+test suite (202 CSVs). 213 of 214 agree on every path; the exception is a real
+stray quote (a seconds mark in GPS coordinates), which the strict paths now reject as
+designed and the lenient scalar parser reads as the suite expects. That shape is now
+an adversarial case (`seconds_mark_in_coordinates`).
 - zarbor loads through zsift in parallel, keeping its own sniff, NA rule and
   dictionaries. This also fixes three zarbor loader bugs measured on 2026-09-29: a
   quoted newline splits a row (and can flip a numeric column to categorical), escaped
