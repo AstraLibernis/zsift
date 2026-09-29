@@ -15,44 +15,12 @@ const methods = @import("methods.zig");
 const experiment = @import("experiment.zig");
 const drive = @import("drive.zig");
 const gen = @import("gen.zig");
+const verify = @import("verify.zig");
 
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 
-/// In-memory reader with a bounded window, serving the corpus through real
-/// refills/rebases — so the streaming number reflects genuine streaming cost,
-/// not a single in-memory pass.
-const MemReader = struct {
-    interface: Reader,
-    data: []const u8,
-    pos: usize,
-
-    fn init(window: []u8, data: []const u8) MemReader {
-        return .{
-            .interface = .{
-                .vtable = &.{
-                    .stream = streamFn,
-                    .discard = Reader.defaultDiscard,
-                    .readVec = Reader.defaultReadVec,
-                    .rebase = Reader.defaultRebase,
-                },
-                .buffer = window,
-                .seek = 0,
-                .end = 0,
-            },
-            .data = data,
-            .pos = 0,
-        };
-    }
-
-    fn streamFn(r: *Reader, w: *Writer, limit: std.Io.Limit) Reader.StreamError!usize {
-        const self: *MemReader = @alignCast(@fieldParentPtr("interface", r));
-        if (self.pos >= self.data.len) return error.EndOfStream;
-        const n = try w.write(limit.sliceConst(self.data[self.pos..]));
-        self.pos += n;
-        return n;
-    }
-};
+const MemReader = @import("memreader.zig").MemReader;
 
 /// Monotonic nanoseconds. Linux-only by design (this is a benchmark, and all
 /// numbers are machine-specific anyway). Isolated here so it is easy to swap.
@@ -381,6 +349,12 @@ pub fn main(init: std.process.Init) !void {
     // vs-all / random). Replaces the former Nushell drivers. See `drive.zig`.
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "drive")) {
         return drive.main(init, argv[2..]);
+    }
+
+    // `bench verify [--out P] [paths]` — every parser path over the same bytes,
+    // judged against the scalar oracle / EXPECT.tsv. See `verify.zig`.
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "verify")) {
+        return verify.main(init, argv[2..]);
     }
 
     // `bench gen <kind> <dir>` — deterministic corpus generators (structured / random).

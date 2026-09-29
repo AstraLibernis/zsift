@@ -18,6 +18,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 const print = std.debug.print;
+const cases = @import("cases.zig");
 
 const target_bytes = 16 * 1024 * 1024;
 
@@ -27,13 +28,14 @@ pub const GenError = error{BadArgs};
 pub fn main(init: std.process.Init, args: []const []const u8) !void {
     const alloc = init.arena.allocator();
     if (args.len == 0) {
-        print("usage: bench gen <structured|random> <dir> [N]\n", .{});
+        print("usage: bench gen <structured|random|typed|adversarial> <dir> [N]\n", .{});
         return GenError.BadArgs;
     }
     if (eql(u8, args[0], "structured")) return structured(init, alloc, args[1..]);
     if (eql(u8, args[0], "random")) return random(init, alloc, args[1..]);
     if (eql(u8, args[0], "typed")) return typed(init, alloc, args[1..]);
-    print("unknown generator '{s}' (structured|random|typed)\n", .{args[0]});
+    if (eql(u8, args[0], "adversarial")) return adversarial(init, alloc, args[1..]);
+    print("unknown generator '{s}' (structured|random|typed|adversarial)\n", .{args[0]});
     return GenError.BadArgs;
 }
 
@@ -44,6 +46,25 @@ fn ensureDir(init: std.process.Init, dir: []const u8) !void {
 fn writeCorpus(init: std.process.Init, alloc: Allocator, dir: []const u8, name: []const u8, bytes: []const u8) !void {
     const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, name });
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = bytes });
+}
+
+/// `bench gen adversarial <dir>`: every case in cases.zig as `<name>.csv`, plus the
+/// EXPECT.tsv manifest `bench verify` reads.
+fn adversarial(init: std.process.Init, alloc: Allocator, rest: []const []const u8) !void {
+    if (rest.len < 1) {
+        print("usage: bench gen adversarial <dir>\n", .{});
+        return GenError.BadArgs;
+    }
+    const dir = rest[0];
+    try ensureDir(init, dir);
+    var manifest: std.ArrayList(u8) = .empty;
+    const all = try cases.all(alloc);
+    for (all) |c| {
+        try writeCorpus(init, alloc, dir, try std.fmt.allocPrint(alloc, "{s}.csv", .{c.name}), c.bytes);
+        try manifest.print(alloc, "{s}\t{s}\n", .{ c.name, @tagName(c.expect) });
+    }
+    try writeCorpus(init, alloc, dir, "EXPECT.tsv", manifest.items);
+    print("wrote {d} adversarial cases + EXPECT.tsv to {s}\n", .{ all.len, dir });
 }
 
 fn mib(n: usize) f64 {

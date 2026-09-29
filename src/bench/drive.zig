@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const paths = @import("build_paths");
+const verify = @import("verify.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -72,6 +73,7 @@ pub fn main(init: std.process.Init, args: []const []const u8) !void {
     if (eql(u8, name, "vs-all")) return vsAll(init, alloc, rest);
     if (eql(u8, name, "vs-serde")) return vsSerde(init, alloc, rest);
     if (eql(u8, name, "random")) return random(init, alloc, rest);
+    if (eql(u8, name, "baseline")) return baseline(init, alloc, rest);
     print("unknown driver '{s}' (throughput|matrix|vs-rust|vs-all|vs-serde|random)\n", .{name});
     return DriveError.UnknownDriver;
 }
@@ -218,6 +220,33 @@ fn throughput(init: std.process.Init, alloc: Allocator, rest: []const []const u8
         for (pths) |path| {
             const name = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ p, path });
             try units.append(alloc, try mkUnit(alloc, name, &.{ zsift, p, path }));
+        }
+    }
+    try runUnits(init, alloc, units.items, opts);
+}
+
+/// Fenced baseline over the private real-world corpus: every `.csv` under
+/// $ZSIFT_TESTDATA × every serial path. Unset → SKIPPED (nothing measured). Results
+/// default to $ZSIFT_TESTDATA/results/baseline.json: beside the data, never in the repo.
+/// Usage: `bench drive baseline [--reps N] [--wait W] [--out PATH]`.
+fn baseline(init: std.process.Init, alloc: Allocator, rest: []const []const u8) !void {
+    var opts = RunOptions{ .reps = 5 };
+    var pos: std.ArrayList([]const u8) = .empty;
+    try parseFlags(alloc, rest, &opts, &pos);
+    const td = init.environ_map.get("ZSIFT_TESTDATA") orelse {
+        print("SKIPPED: $ZSIFT_TESTDATA is unset — no baseline was measured.\n", .{});
+        return;
+    };
+    if (opts.out.len == 0) opts.out = try std.fs.path.join(alloc, &.{ td, "results", "baseline.json" });
+
+    const zsift = try zsiftBin(init);
+    const pths = [_][]const u8{ "scalar", "pull", "push", "stream", "ceil" };
+    var units: std.ArrayList(Unit) = .empty;
+    for (try verify.listCsv(init.io, alloc, td)) |file| {
+        const rel = if (std.mem.startsWith(u8, file, td)) std.mem.trimStart(u8, file[td.len..], "/") else file;
+        for (pths) |path| {
+            const name = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ rel, path });
+            try units.append(alloc, try mkUnit(alloc, name, &.{ zsift, "file", path, file }));
         }
     }
     try runUnits(init, alloc, units.items, opts);

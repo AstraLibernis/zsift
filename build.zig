@@ -71,6 +71,14 @@ pub fn build(b: *std.Build) void {
     addGenStep(b, bench, "structured", "gen-structured", "Generate the structured corpora: `zig build gen-structured -- <dir>`");
     addGenStep(b, bench, "random", "gen-random", "Generate randomized corpora + meta.json: `zig build gen-random -- <dir> [N]`");
     addGenStep(b, bench, "typed", "gen-typed", "Generate the typed corpus (header'd typed.csv): `zig build gen-typed -- <dir>`");
+    addGenStep(b, bench, "adversarial", "gen-adversarial", "Generate the adversarial corpus + EXPECT.tsv: `zig build gen-adversarial -- <dir>`");
+
+    // `zig build verify -- [paths]` — every parser path over the same bytes, judged
+    // against the scalar oracle (default: $ZSIFT_TESTDATA; unset → SKIPPED).
+    const run_verify = b.addRunArtifact(bench);
+    run_verify.addArg("verify");
+    if (b.args) |args| run_verify.addArgs(args);
+    b.step("verify", "Differential check of every parser path: `zig build verify -- [files/dirs]`").dependOn(&run_verify.step);
 
     // benchfence UNITS drivers (replace the former Nushell drivers). Each execs the
     // vendored benchfence binary over `zig-out/bin/bench`, so they depend on the install.
@@ -80,6 +88,7 @@ pub fn build(b: *std.Build) void {
     addDriveStep(b, bench, "vs-all", "vs-all", "Compare zsift vs zsv vs rust over structured + random corpora");
     addDriveStep(b, bench, "vs-serde", "vs-serde", "Honest typed compare: zsift reader(T) vs rust-csv serde over typed.csv");
     addDriveStep(b, bench, "random", "random", "Compare zsift vs rust-csv over the randomized corpora");
+    addDriveStep(b, bench, "baseline", "baseline", "Fenced baseline over $ZSIFT_TESTDATA (private corpus; results stay beside it)");
 }
 
 /// A `bench gen <kind>` step. Forwards `-- <args>` (e.g. the output dir). Generators
