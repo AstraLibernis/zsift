@@ -16,7 +16,7 @@ opt-in [typed layers](#typed-layers) it still beats `rust-csv`'s serde path (~1.
 fenced) on the same deserialize-into-structs task — and it stays correct and fast on
 real messy data (validated against the Titanic dataset: exact survivor/missing-value
 counts through quoted commas and blank cells). That question is answered, so this is
-**feature-complete and parked** — not abandoned, done. It is deliberately not chasing
+**feature-complete and parked** — not abandoned, done. **Next: v0.4 multi-core parsing is planned** — see [ROADMAP-v0.4.md](ROADMAP-v0.4.md), which also records a silent-misparse bug on the SIMD path (a stray mid-field quote) that it fixes first. It is deliberately not chasing
 feature-parity with full CSV toolkits (writers, dialects, a CLI); mature options
 already fill that space. Bug fixes welcome; scope expansion is out of scope by design.
 
