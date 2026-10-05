@@ -27,6 +27,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // `zig build test-tsan` — the unit tests under ThreadSanitizer, which reports data races at
+    // run time. Needs LLVM (the self-hosted x86 backend does not instrument), libc, and an explicit
+    // linux-gnu target, whose kernel headers ship with Zig (the native one reads /usr/include).
+    const tsan_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/csv.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }),
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = true,
+        }),
+        .use_llvm = true,
+    });
+    b.step("test-tsan", "Run unit tests under ThreadSanitizer (data races)").dependOn(&b.addRunArtifact(tsan_tests).step);
+
     // `zig build bench` — run the throughput benchmark.
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/bench/bench.zig"),
