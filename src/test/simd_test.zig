@@ -60,7 +60,7 @@ test "simd: field straddling a 64-byte chunk boundary" {
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(alloc);
     try src.appendSlice(alloc, "x,");
-    try src.appendSlice(alloc, "y" ** 80); // long field crosses the boundary
+    try src.appendSlice(alloc, repeat("y", 80)); // long field crosses the boundary
     try src.append(alloc, '\n');
 
     var scratch: [256]u8 = undefined;
@@ -77,7 +77,7 @@ test "simd: quoted field straddling a chunk boundary" {
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(alloc);
     try src.append(alloc, '"');
-    try src.appendSlice(alloc, "z" ** 100); // quoted region crosses boundary (carry)
+    try src.appendSlice(alloc, repeat("z", 100)); // quoted region crosses boundary (carry)
     try src.appendSlice(alloc, "\",end\n");
 
     var scratch: [256]u8 = undefined;
@@ -274,4 +274,14 @@ test "simd: differential fuzz — push and pull match generated fields" {
         }
         try testing.expectEqual(expected.items.len, bidx);
     }
+}
+
+/// Comptime string repeat (the `**` array operator was removed in Zig 0.17).
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const arr: [s.len * n]u8 = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &arr;
 }

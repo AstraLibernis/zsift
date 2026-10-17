@@ -57,7 +57,7 @@ test "forEachField (push path) validates before parsing" {
 // builds poison the reclaimed region, so the stale slice reads 0xAA; in release the
 // poisoning is compiled out, so this assertion only holds (and only runs) in Debug.
 test "scratch-backed field is poisoned after resetScratch (debug only)" {
-    if (builtin.mode != .Debug) return error.SkipZigTest;
+    if (builtin.mode != .debug) return error.SkipZigTest;
 
     var scratch: [64]u8 = undefined;
     // `"a""b"` collapses to `a"b` (3 bytes) written into scratch — a borrowed slice.

@@ -231,7 +231,7 @@ fn measureTyped(corpus: []const u8, scratch: []u8, runs: usize) f64 {
             sum +%= @as(u64, @intFromFloat(@abs(row.price)));
             sum +%= @intFromBool(row.flag);
             sum +%= row.name.len;
-            sum +%= @intFromEnum(row.category);
+            sum +%= @backingInt(row.category);
         }
         const dt = nanoTime() - t0;
         std.mem.doNotOptimizeAway(sum);

@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(bench);
 
     const run_bench = b.addRunArtifact(bench);
-    if (b.args) |args| run_bench.addArgs(args);
+    run_bench.addPassthruArgs();
     const bench_step = b.step("bench", "Run the throughput benchmark (human table)");
     bench_step.dependOn(&run_bench.step);
 
@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
     // against the scalar oracle (default: $ZSIFT_TESTDATA; unset → SKIPPED).
     const run_verify = b.addRunArtifact(bench);
     run_verify.addArg("verify");
-    if (b.args) |args| run_verify.addArgs(args);
+    run_verify.addPassthruArgs();
     b.step("verify", "Differential check of every parser path: `zig build verify -- [files/dirs]`").dependOn(&run_verify.step);
 
     // `zig build compare -- [--rounds N] [--paths ..] [files]` — alternating comparison
@@ -97,13 +97,13 @@ pub fn build(b: *std.Build) void {
     // -Doptimize=ReleaseFast for meaningful numbers.
     const run_compare = b.addRunArtifact(bench);
     run_compare.addArg("compare");
-    if (b.args) |args| run_compare.addArgs(args);
+    run_compare.addPassthruArgs();
     b.step("compare", "Alternating comparison of parser paths: `zig build compare -Doptimize=ReleaseFast -- [files/dirs]`").dependOn(&run_compare.step);
 
     // `zig build sweep -Doptimize=ReleaseFast -- <file.csv>` — where the parallel path pays.
     const run_sweep = b.addRunArtifact(bench);
     run_sweep.addArg("sweep");
-    if (b.args) |args| run_sweep.addArgs(args);
+    run_sweep.addPassthruArgs();
     b.step("sweep", "Size x worker-count sweep of the parallel path: `zig build sweep -Doptimize=ReleaseFast -- <file.csv>`").dependOn(&run_sweep.step);
 }
 
@@ -112,6 +112,6 @@ pub fn build(b: *std.Build) void {
 fn addGenStep(b: *std.Build, bench: *std.Build.Step.Compile, kind: []const u8, step_name: []const u8, desc: []const u8) void {
     const run = b.addRunArtifact(bench);
     run.addArgs(&.{ "gen", kind });
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(step_name, desc).dependOn(&run.step);
 }

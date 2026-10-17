@@ -1,6 +1,6 @@
 # zsift
 
-Fast, zero-allocation parsing of delimited/tabular text in Zig (0.16) — CSV is the
+Fast, zero-allocation parsing of delimited/tabular text in Zig (0.17) — CSV is the
 default, but the delimiter and quote are configurable, so TSV, pipe-delimited, and
 friends work too. A benchmark harness is built in from day one, so every design
 choice is measured, not guessed. zsift offers a lenient scalar parser, a vectorized

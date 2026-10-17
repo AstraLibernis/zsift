@@ -71,7 +71,7 @@ fn genCsv(alloc: std.mem.Allocator, seed: u64, records: usize) ![]u8 {
 }
 
 test "parallel: countQuotes matches a byte count" {
-    const input = "\"a\"\",\"b\"\n" ** 40 ++ "tail\"";
+    const input = repeat("\"a\"\",\"b\"\n", 40) ++ "tail\"";
     var want: u64 = 0;
     for (input) |c| want += @intFromBool(c == '"');
     try testing.expectEqual(want, parallel.countQuotes(input, '"'));
@@ -130,7 +130,7 @@ test "parallel: an odd number of quotes is UnterminatedQuote" {
 }
 
 test "parallel: one record spanning every cut gives empty middle ranges" {
-    const input = "\"" ++ "x\n" ** 200 ++ "\"\nlast\n";
+    const input = "\"" ++ repeat("x\n", 200) ++ "\"\nlast\n";
     var bounds: [9]usize = undefined;
     try parallel.splitRecords(input, .{}, &bounds);
     try testing.expectEqual(try digestWhole(input), try digestSplit(input, &bounds));
@@ -140,6 +140,12 @@ test "parallel: one record spanning every cut gives empty middle ranges" {
 // parallel.forEachField: concatenated sink output == serial output, errors == serial
 // ---------------------------------------------------------------------------
 
+/// Worker-side allocator. Each Collector runs on its own thread; under ThreadSanitizer
+/// on Zig 0.17.0, std.testing.allocator (SafeAllocator) reports races between one
+/// thread's appendSlice and another thread's remap footer — allocator-internal, not
+/// zsift's — so the workers take the SMP allocator and the main thread keeps the leak-checked one.
+const worker_alloc = std.heap.smp_allocator;
+
 /// Serializes every field it receives (length-prefixed bytes + record-end flag).
 const Collector = struct {
     out: std.ArrayList(u8) = .empty,
@@ -147,13 +153,13 @@ const Collector = struct {
 
     fn on(self: *Collector, bytes: []const u8, last: bool) void {
         const len: u32 = @intCast(bytes.len);
-        self.out.appendSlice(testing.allocator, std.mem.asBytes(&len)) catch {
+        self.out.appendSlice(worker_alloc, std.mem.asBytes(&len)) catch {
             self.fail = true;
         };
-        self.out.appendSlice(testing.allocator, bytes) catch {
+        self.out.appendSlice(worker_alloc, bytes) catch {
             self.fail = true;
         };
-        self.out.append(testing.allocator, @intFromBool(last)) catch {
+        self.out.append(worker_alloc, @intFromBool(last)) catch {
             self.fail = true;
         };
     }
@@ -176,7 +182,7 @@ fn parallelOf(io: std.Io, input: []const u8, n: usize) !std.ArrayList(u8) {
         ptrs[i] = &cols[i];
         scratches[i] = &bufs[i];
     }
-    defer for (cols[0..n]) |*c| c.out.deinit(testing.allocator);
+    defer for (cols[0..n]) |*c| c.out.deinit(worker_alloc);
     try csv.parallel.forEachFieldExact(io, input, .{}, scratches[0..n], ptrs[0..n], Collector.on);
     var all: std.ArrayList(u8) = .empty;
     for (cols[0..n]) |*c| {
@@ -189,7 +195,7 @@ fn parallelOf(io: std.Io, input: []const u8, n: usize) !std.ArrayList(u8) {
 fn expectParallelMatchesSerial(io: std.Io, input: []const u8) !void {
     var scratch: [1024]u8 = undefined;
     var want = try serialOf(input, &scratch);
-    defer want.deinit(testing.allocator);
+    defer want.deinit(worker_alloc);
     for (1..17) |n| {
         var got = try parallelOf(io, input, n);
         defer got.deinit(testing.allocator);
@@ -229,7 +235,7 @@ fn parallelErr(io: std.Io, input: []const u8, n: usize) ?anyerror {
 fn serialErr(input: []const u8) ?anyerror {
     var scratch: [1024]u8 = undefined;
     var c = Collector{};
-    defer c.out.deinit(testing.allocator);
+    defer c.out.deinit(worker_alloc);
     csv.simd.forEachField(input, &scratch, .{}, &c, Collector.on) catch |e| return e;
     return null;
 }
@@ -281,7 +287,7 @@ test "parallel: parseReader in memory equals serial, streaming falls back to ctx
     try testing.expect(input.len >= csv.parallel.min_parallel_bytes);
     var scratch: [1024]u8 = undefined;
     var want = try serialOf(input, &scratch);
-    defer want.deinit(testing.allocator);
+    defer want.deinit(worker_alloc);
 
     for ([_]?u64{ input.len, null }) |hint| {
         var cols: [8]Collector = @splat(.{});
@@ -292,7 +298,7 @@ test "parallel: parseReader in memory equals serial, streaming falls back to ctx
             ptrs[i] = &cols[i];
             scratches[i] = &bufs[i];
         }
-        defer for (&cols) |*c| c.out.deinit(testing.allocator);
+        defer for (&cols) |*c| c.out.deinit(worker_alloc);
         var mr = std.Io.Reader.fixed(input);
         const strategy = try csv.parallel.parseReader(io, alloc, &mr, hint, .{}, &scratches, &ptrs, Collector.on);
         try testing.expectEqual(if (hint == null) csv.Strategy.streaming else csv.Strategy.in_memory, strategy);
@@ -351,7 +357,7 @@ const RowSink = struct {
             self.fail = true;
             return;
         };
-        self.out.appendSlice(testing.allocator, line) catch {
+        self.out.appendSlice(worker_alloc, line) catch {
             self.fail = true;
         };
     }
@@ -376,7 +382,7 @@ fn parallelRows(io: std.Io, input: []const u8, n: usize) !std.ArrayList(u8) {
         ptrs[i] = &sinks[i];
         scratches[i] = &bufs[i];
     }
-    defer for (sinks[0..n]) |*s| s.out.deinit(testing.allocator);
+    defer for (sinks[0..n]) |*s| s.out.deinit(worker_alloc);
     try csv.parallel.forEachRow(WideReader, io, input, .{}, true, scratches[0..n], ptrs[0..n], RowSink.on);
     var all: std.ArrayList(u8) = .empty;
     var used: usize = 0;
@@ -397,7 +403,7 @@ test "parallel: forEachRow with a header equals the serial reader(T)" {
     defer alloc.free(input);
     try testing.expect(input.len >= csv.parallel.min_parallel_bytes);
     var want = try serialRows(input);
-    defer want.deinit(testing.allocator);
+    defer want.deinit(worker_alloc);
     for ([_]usize{ 1, 2, 5, 12 }) |n| {
         var got = try parallelRows(threaded.io(), input, n);
         defer got.deinit(testing.allocator);
@@ -434,16 +440,16 @@ const RecSink = struct {
             return;
         };
         const name = rec.get("name").?;
-        self.out.appendSlice(testing.allocator, id.bytes) catch {
+        self.out.appendSlice(worker_alloc, id.bytes) catch {
             self.fail = true;
         };
-        self.out.append(testing.allocator, '=') catch {
+        self.out.append(worker_alloc, '=') catch {
             self.fail = true;
         };
-        self.out.appendSlice(testing.allocator, name.bytes) catch {
+        self.out.appendSlice(worker_alloc, name.bytes) catch {
             self.fail = true;
         };
-        self.out.append(testing.allocator, '\n') catch {
+        self.out.append(worker_alloc, '\n') catch {
             self.fail = true;
         };
     }
@@ -461,7 +467,7 @@ test "parallel: forEachRecord with a captured header equals the serial record lo
     const split = try csv.parallel.splitHeader(input, .{}, &slots, &hscratch);
 
     var want = RecSink{};
-    defer want.out.deinit(testing.allocator);
+    defer want.out.deinit(worker_alloc);
     {
         var scratch: [1024]u8 = undefined;
         var p = try csv.SimdParser.init(split.data, &scratch, .{});
@@ -476,7 +482,7 @@ test "parallel: forEachRecord with a captured header equals the serial record lo
         ptrs[i] = &sinks[i];
         scratches[i] = &bufs[i];
     }
-    defer for (&sinks) |*s| s.out.deinit(testing.allocator);
+    defer for (&sinks) |*s| s.out.deinit(worker_alloc);
     try csv.parallel.forEachRecord(threaded.io(), split.data, .{}, &split.header, 8, &scratches, &ptrs, RecSink.on);
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(testing.allocator);
@@ -486,4 +492,14 @@ test "parallel: forEachRecord with a captured header equals the serial record lo
     }
     try testing.expect(!want.fail);
     try testing.expectEqualSlices(u8, want.out.items, all.items);
+}
+
+/// Comptime string repeat (the `**` array operator was removed in Zig 0.17).
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const arr: [s.len * n]u8 = comptime blk: {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        break :blk out;
+    };
+    return &arr;
 }
